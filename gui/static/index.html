@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0f1117">
+  <title>English Coach</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Startup loading overlay -->
+  <div id="startup-overlay">
+    <div class="startup-inner">
+      <div style="font-size:48px;margin-bottom:16px">📚</div>
+      <div style="font-size:20px;font-weight:600;margin-bottom:8px">English Coach</div>
+      <div class="spinner" style="margin:16px auto"></div>
+      <div id="startup-msg" style="font-size:13px;color:var(--text-dim);margin-top:8px">Starting…</div>
+    </div>
+  </div>
+
+  <!-- Desktop sidebar -->
+  <nav id="sidebar">
+    <div class="logo">
+      <span class="logo-icon">📚</span>
+      <span class="logo-text">English Coach</span>
+    </div>
+    <ul class="nav-links">
+      <li><a href="#home"      class="nav-link active" data-page="home">🏠 Home</a></li>
+      <li><a href="#vocab"     class="nav-link" data-page="vocab">🃏 Vocab</a></li>
+      <li><a href="#grammar"   class="nav-link" data-page="grammar">✏️ Grammar</a></li>
+      <li><a href="#reading"   class="nav-link" data-page="reading">📖 Reading</a></li>
+      <li><a href="#listening" class="nav-link" data-page="listening">🎧 Listening</a></li>
+      <li><a href="#writing"   class="nav-link" data-page="writing">📝 Writing</a></li>
+      <li><a href="#chat"      class="nav-link" data-page="chat">💬 Chat</a></li>
+      <li><a href="#progress"  class="nav-link" data-page="progress">📊 Progress</a></li>
+      <li><a href="#history"   class="nav-link" data-page="history">📋 History</a></li>
+    </ul>
+    <div class="sidebar-footer">
+      <a href="#license" class="nav-link small" data-page="license">🔑 License</a>
+      <a href="#setup"   class="nav-link small" data-page="setup">⚙️ Setup</a>
+    </div>
+  </nav>
+
+  <main id="content">
+    <div id="page-container"></div>
+  </main>
+
+  <!-- Mobile bottom nav (5 primary tabs + More) -->
+  <nav id="mobile-nav">
+    <div class="mnav-items">
+      <button class="mnav-btn active" data-page="home">
+        <span class="mnav-icon">🏠</span>Home
+      </button>
+      <button class="mnav-btn" data-page="vocab">
+        <span class="mnav-icon">🃏</span>Vocab
+      </button>
+      <button class="mnav-btn" data-page="listening">
+        <span class="mnav-icon">🎧</span>Listen
+      </button>
+      <button class="mnav-btn" data-page="chat">
+        <span class="mnav-icon">💬</span>Chat
+      </button>
+      <button class="mnav-btn" id="mnav-more-btn">
+        <span class="mnav-icon">⋯</span>More
+      </button>
+    </div>
+  </nav>
+
+  <!-- Mobile "More" drawer overlay -->
+  <div id="mobile-more-drawer-overlay"></div>
+
+  <!-- Mobile "More" drawer -->
+  <div id="mobile-more-drawer">
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:12px;font-weight:600;letter-spacing:.5px">MORE</div>
+    <div class="more-grid">
+      <button class="more-item" data-page="grammar"><span class="more-icon">✏️</span>Grammar</button>
+      <button class="more-item" data-page="reading"><span class="more-icon">📖</span>Reading</button>
+      <button class="more-item" data-page="writing"><span class="more-icon">📝</span>Writing</button>
+      <button class="more-item" data-page="progress"><span class="more-icon">📊</span>Progress</button>
+      <button class="more-item" data-page="history"><span class="more-icon">📋</span>History</button>
+      <button class="more-item" data-page="license"><span class="more-icon">🔑</span>License</button>
+      <button class="more-item" data-page="setup"><span class="more-icon">⚙️</span>Setup</button>
+    </div>
+  </div>
+
+  <script src="/static/chart.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
