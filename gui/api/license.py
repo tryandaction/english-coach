@@ -38,7 +38,13 @@ def load_saved_license() -> tuple[str, str, int, int, str]:
         return "", "", 0, 0, ""
     content = lf.read_text(encoding="utf-8").strip()
     parts = content.split("|")
-    # New format: key|machine_id|activate_ts|days|sig (5 parts)
+    # New format with encrypted API key: key|machine_id|activate_ts|days|encrypted_api_key|sig (6 parts)
+    if len(parts) == 6:
+        try:
+            return parts[0], parts[1], int(parts[2]), int(parts[3]), parts[5]
+        except ValueError:
+            pass
+    # Old format: key|machine_id|activate_ts|days|sig (5 parts)
     if len(parts) == 5:
         try:
             return parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4]
@@ -57,6 +63,29 @@ def save_license(key: str, machine_id: str, activate_ts: int, days: int) -> None
     lf = _license_file()
     lf.parent.mkdir(parents=True, exist_ok=True)
     record = make_license_record(key, machine_id, activate_ts, days)
+    lf.write_text(record, encoding="utf-8")
+
+
+def save_license_with_key(key: str, machine_id: str, activate_ts: int, days: int, api_key: str) -> None:
+    """Save license with encrypted API key embedded."""
+    lf = _license_file()
+    lf.parent.mkdir(parents=True, exist_ok=True)
+
+    # Encrypt API key using same derivation as activation
+    import hashlib
+    norm = key.replace("-", "")
+    derived = hashlib.sha256(f"{norm}:{machine_id}:{WORKER_TOKEN}".encode()).hexdigest()
+
+    # XOR encrypt the API key
+    key_bytes = api_key.encode()
+    derived_bytes = bytes.fromhex(derived)
+    encrypted = bytes(key_bytes[i] ^ derived_bytes[i % len(derived_bytes)] for i in range(len(key_bytes)))
+    encrypted_hex = encrypted.hex()
+
+    # Format: key|machine_id|activate_ts|days|encrypted_api_key|sig
+    from gui.license import _make_hmac
+    sig = _make_hmac(key, machine_id, activate_ts)
+    record = f"{key}|{machine_id}|{activate_ts}|{days}|{encrypted_hex}|{sig}"
     lf.write_text(record, encoding="utf-8")
 
 
@@ -125,17 +154,12 @@ def activate_license(req: LicenseRequest):
     except Exception as e:
         return {"ok": False, "error": f"解密 API Key 失败（{e}）"}
 
-    # 4. Save license file with days
+    # 4. Save license file with days and encrypted API key
     activate_ts = result["activate_ts"]
     days = result["days"]
-    save_license(display_key, machine_id, activate_ts, days)
+    save_license_with_key(display_key, machine_id, activate_ts, days, cloud_api_key)
 
-    # 5. Write cloud API key to .env next to config.yaml
-    env_file = _CONFIG_PATH.parent / ".env"
-    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
-    lines = [l for l in lines if not l.startswith("DEEPSEEK_API_KEY=")]
-    lines.append(f"DEEPSEEK_API_KEY={cloud_api_key}")
-    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # 5. Set API key in environment for current session
     os.environ["DEEPSEEK_API_KEY"] = cloud_api_key
 
     # 6. Update config to use deepseek backend

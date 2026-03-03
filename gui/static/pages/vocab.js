@@ -244,7 +244,10 @@ function renderCard(el, content, card, revealed) {
   `;
 
   const fc = content.querySelector('#fc');
-  fc.addEventListener('click', async () => {
+  fc.addEventListener('click', async (e) => {
+    // Don't flip if clicking TTS button
+    if (e.target.closest('.tts-btn')) return;
+
     if (_revealed) {
       // flip back to front
       fc.classList.remove('flipped');
@@ -980,7 +983,10 @@ function renderBookCard(el, content, sessionBody, card, revealed, book) {
     </div>`;
 
   const fc = sessionBody.querySelector('#bfc');
-  fc.addEventListener('click', async () => {
+  fc.addEventListener('click', async (e) => {
+    // Don't flip if clicking TTS button
+    if (e.target.closest('.tts-btn')) return;
+
     if (_revealed) {
       fc.classList.remove('flipped');
       _revealed = false;

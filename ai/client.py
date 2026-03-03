@@ -622,11 +622,27 @@ _WRITING_RUBRICS = {
 
 def load_client(config: dict, data_dir: Path) -> Optional["AIClient"]:
     """
-    Load AIClient from config + .env file.
-    Backend priority: config['backend'] > auto-detect from available env vars.
+    Load AIClient from License (cloud version) or .env file (opensource version).
+    Priority: License activation > .env file
     Returns None if no API key found.
     """
-    # Load .env file if present (no extra dependency needed)
+    # 1. Check License activation first (cloud version)
+    try:
+        from gui.license import get_license_api_key
+        license_key = get_license_api_key(data_dir)
+        if license_key:
+            # Cloud version: use DeepSeek with license key
+            return AIClient(
+                api_key=license_key,
+                cache_db_path=data_dir / "ai_cache.db",
+                default_model="deepseek-chat",
+                writing_model="deepseek-chat",
+                base_url="https://api.deepseek.com/v1",
+            )
+    except Exception:
+        pass  # License not available or not activated
+
+    # 2. Fall back to .env file (opensource version)
     env_file = data_dir.parent / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8").splitlines():
