@@ -1,0 +1,47 @@
+# User data — never commit
+data/
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Config with API key
+config.yaml
+
+# Environment variables (API keys)
+.env
+.env.*
+!.env.example
+
+# PyInstaller
+*.spec.bak
+*.pkg
+
+# Distribution package (contains binary)
+dist_package/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Releases folder (contains binaries and sensitive files)
+releases/
+!releases/*.md
+
+# Commercial/License system (not for open source)
+send_key.py
+license_keygen.py
+key_log.jsonl
+云版卖家操作手册.md
+cloudflare-pages/
+cloudflare-worker/
+
+# Build artifacts
+*.exe
+*.zip

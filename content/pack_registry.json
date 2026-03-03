@@ -1,0 +1,42 @@
+[
+  {
+    "name": "TOEFL_Speaking_AI",
+    "exam": "toefl",
+    "description": "TOEFL speaking task prompts and model responses"
+  },
+  {
+    "name": "TOEFL_Reading_25",
+    "exam": "toefl",
+    "description": "25 full TOEFL reading passages with questions"
+  },
+  {
+    "name": "TOEFL_Full_Mock",
+    "exam": "toefl",
+    "description": "Complete TOEFL mock test materials"
+  },
+  {
+    "name": "GRE_Physics_Mock",
+    "exam": "gre",
+    "description": "GRE Physics subject test practice materials"
+  },
+  {
+    "name": "GRE_Vocab_3000",
+    "exam": "gre",
+    "description": "3000 high-frequency GRE vocabulary words"
+  },
+  {
+    "name": "IELTS_Academic",
+    "exam": "ielts",
+    "description": "IELTS Academic reading and writing materials"
+  },
+  {
+    "name": "CET4_CET6",
+    "exam": "cet",
+    "description": "CET-4 and CET-6 vocabulary and reading passages"
+  },
+  {
+    "name": "Academic_English_STEM",
+    "exam": "general",
+    "description": "Academic English for science and engineering"
+  }
+]
