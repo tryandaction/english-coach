@@ -68,6 +68,8 @@ test_api_endpoints.py
 test_endpoints_direct.py
 content/vocab_expanded/
 content/vocab_selected/
+fix_typing.py
+fix_uvicorn_types.py
 
 # Build artifacts
 *.exe
