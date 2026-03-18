@@ -7,17 +7,39 @@ function _clearExamCache() {
 export async function render(el) {
   let status = {};
   try { status = await api.get('/api/setup/status'); } catch (e) {}
+  const versionMode = status.version_mode || 'opensource';
   let licStatus = {};
-  try { licStatus = await api.get('/api/license/status'); } catch (e) {}
+  if (versionMode === 'cloud') {
+    try { licStatus = await api.get('/api/license/status'); } catch (e) {}
+  }
+  const activationAvailable = !!licStatus.activation_available;
+  const effectiveAiMode = status.ai_mode || (licStatus.active ? 'cloud' : status.has_self_key ? 'self_key' : 'none');
+  const apiHint = effectiveAiMode === 'cloud'
+    ? '(当前由 Cloud License 提供 AI，可留空保留)'
+    : status.has_self_key
+    ? '(已配置，可留空保留)'
+    : versionMode === 'cloud' && licStatus.active
+    ? '(可选)'
+    : '';
+  const apiPlaceholder = effectiveAiMode === 'cloud'
+    ? 'Cloud License 已提供 AI，可按需覆盖'
+    : status.has_self_key
+    ? '留空可保留当前配置'
+    : 'sk-...';
 
   const isFirstRun = !status.configured;
 
   if (!isFirstRun) {
-    renderSettings(el, status, licStatus);
+    renderSettings(el, status, licStatus, versionMode);
     return;
   }
 
   // ── First-run wizard ──────────────────────────────────────────────────────
+  // Skip license step in opensource version
+  const steps = versionMode === 'opensource'
+    ? ['import', 'info', 'ai', 'prefs', 'done']
+    : ['import', 'info', 'license', 'ai', 'prefs', 'done'];
+
   el.innerHTML = `
     <div style="max-width:520px;margin:0 auto">
       <h1 style="margin-bottom:4px">Welcome to English Coach 👋</h1>
@@ -29,8 +51,7 @@ export async function render(el) {
         <div class="step-dot" data-s="2">2</div>
         <div class="step-line"></div>
         <div class="step-dot" data-s="3">3</div>
-        <div class="step-line"></div>
-        <div class="step-dot" data-s="4">4</div>
+        ${versionMode === 'cloud' ? '<div class="step-line"></div><div class="step-dot" data-s="4">4</div>' : ''}
       </div>
 
       <div class="card" style="padding:28px">
@@ -97,14 +118,14 @@ export async function render(el) {
         </div>
 
         <!-- Step 2: License -->
+        ${versionMode === 'cloud' ? `
         <div class="setup-step" id="step-2">
           <h2 style="margin-bottom:8px">Activate Cloud License</h2>
-          <p style="margin-bottom:20px">After purchase you'll receive a key like <code style="color:var(--accent);font-size:12px">XXXX-XXXX-XXXX-XXXX</code></p>
-
           ${licStatus.active ? `
           <div class="alert alert-success" style="margin-bottom:16px">
             ✓ Cloud license active — <strong>${licStatus.days_left}</strong> days remaining
-          </div>` : ''}
+          </div>` : activationAvailable ? `
+          <p style="margin-bottom:20px">This build has a configured activation service. Enter a key like <code style="color:var(--accent);font-size:12px">XXXX-XXXX-XXXX-XXXX</code> to enable the embedded AI setup on this device.</p>
 
           <div class="form-group">
             <label>License Key</label>
@@ -116,19 +137,38 @@ export async function render(el) {
             <button class="btn btn-outline" id="btn-back-2">← Back</button>
             <button class="btn btn-primary" id="btn-activate">Activate Key</button>
           </div>
+          ` : `
+          <div class="alert alert-info" style="margin-bottom:16px">
+            当前构建未配置激活服务
+          </div>
+          <p style="margin-bottom:16px;color:var(--text-dim)">${licStatus.activation_reason || '没有服务器时，请直接配置你自己的 API key。'}</p>
+          <div style="font-size:14px;line-height:1.7;color:var(--text);margin-bottom:8px">
+            <div>• 有 API key：下一步可直接配置 DeepSeek / OpenAI / Claude / Qwen。</div>
+            <div>• 没有 API key：仍可使用 Vocabulary、Grammar、Reading fallback、Listening 等离线能力。</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
+            <button class="btn btn-outline" id="btn-back-2">← Back</button>
+            <button class="btn btn-primary" id="btn-skip-lic-direct">Continue →</button>
+          </div>
+          `}
           <button class="btn" id="btn-skip-lic" style="width:100%;margin-top:10px;background:transparent;color:var(--text-dim);font-size:13px">
             ${licStatus.active ? 'Continue →' : 'Skip — I have my own API key →'}
           </button>
         </div>
+        ` : ''}
 
         <!-- Step 3: Self API Key -->
         <div class="setup-step" id="step-3">
           <h2 style="margin-bottom:8px">Configure AI</h2>
 
-          ${licStatus.active ? `
+          ${versionMode === 'cloud' && licStatus.active ? `
           <div class="alert alert-success" style="margin-bottom:16px">
             ✓ Cloud license active — no API key needed (optional)
-          </div>` : `
+          </div>` : versionMode === 'opensource' ? `
+          <p style="margin-bottom:20px">Provide your own API key to use AI features (writing feedback, reading questions, chat). You can skip this and use offline features (grammar, vocab) for free.</p>
+          ` : versionMode === 'cloud' && !activationAvailable ? `
+          <p style="margin-bottom:20px">当前构建没有激活服务器。要使用 AI 功能，请在这里直接配置你自己的 API key；否则也可以跳过，先使用离线主流程。</p>
+          ` : `
           <p style="margin-bottom:20px">Used for writing feedback, reading questions, and chat. You can skip this and use offline features (grammar, vocab) for free.</p>
           `}
 
@@ -142,8 +182,8 @@ export async function render(el) {
             </select>
           </div>
           <div class="form-group">
-            <label>API Key <span style="color:var(--text-dim)">${status.has_api_key ? '(set — leave blank to keep)' : licStatus.active ? '(optional)' : ''}</span></label>
-            <input id="inp-apikey" type="password" placeholder="${status.has_api_key ? 'Leave blank to keep current' : 'sk-...'}">
+            <label>API Key <span id="api-key-hint" style="color:var(--text-dim)">${apiHint}</span></label>
+            <input id="inp-apikey" type="password" placeholder="${apiPlaceholder}">
             <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Stored locally in .env — never uploaded</div>
           </div>
           <div id="api-msg"></div>
@@ -210,27 +250,7 @@ export async function render(el) {
 
       </div>
 
-      <!-- Purchase info -->
-      <div id="buy-info" style="margin-top:16px">
-        <details>
-          <summary style="cursor:pointer;color:var(--text-dim);font-size:13px;padding:8px 0">Buy Cloud License (optional) ▸</summary>
-          <div class="card" style="margin-top:8px;padding:20px">
-            <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">First purchase (includes exe)</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:14px">
-              ${priceBox('exe only','¥19.9','one-time','var(--border)','var(--text)')}
-              ${priceBox('exe + 1mo API','¥29.9','recommended','var(--accent)','var(--accent)')}
-              ${priceBox('exe + 1yr API','¥109','save ¥60','var(--yellow)','var(--yellow)')}
-            </div>
-            <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Renew API (already have exe)</div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-              ${priceBox('1 month','¥19.9','','var(--border)','var(--text)')}
-              ${priceBox('3 months','¥49','save ¥11','var(--border)','var(--text)')}
-              ${priceBox('1 year','¥149','save ¥90','var(--green)','var(--green)')}
-            </div>
-            <p style="margin-top:12px;font-size:12px">Search "英语教练" on Xianyu to purchase. Key sent after payment.</p>
-          </div>
-        </details>
-      </div>
+      <div id="buy-info" style="display:none"></div>
     </div>
   `;
 
@@ -298,34 +318,50 @@ export async function render(el) {
     if (!el.querySelector('#inp-name').value.trim()) {
       el.querySelector('#inp-name').focus(); return;
     }
-    setStep(2);
+    // Skip to step 3 in opensource, step 2 in cloud
+    setStep(versionMode === 'opensource' ? 3 : 2);
   });
 
-  el.querySelector('#btn-back-2').addEventListener('click', () => setStep(1));
+  if (versionMode === 'cloud') {
+    el.querySelector('#btn-back-2')?.addEventListener('click', () => setStep(1));
 
-  el.querySelector('#btn-activate').addEventListener('click', async () => {
-    const key = el.querySelector('#inp-license').value.trim();
-    const msg = el.querySelector('#lic-msg');
-    const btn = el.querySelector('#btn-activate');
-    if (!key) { msg.innerHTML = '<div class="alert alert-error" style="margin-top:8px">Please enter a License Key</div>'; return; }
-    btn.disabled = true; btn.textContent = 'Verifying…';
-    try {
-      const r = await api.post('/api/license/activate', { key });
-      if (r.ok) {
-        msg.innerHTML = `<div class="alert alert-success" style="margin-top:8px">✓ Activated! ${r.days_left} days remaining</div>`;
-        setTimeout(() => setStep(3), 1000);
-      } else {
-        msg.innerHTML = `<div class="alert alert-error" style="margin-top:8px">${r.error}</div>`;
+    el.querySelector('#btn-activate')?.addEventListener('click', async () => {
+      const key = el.querySelector('#inp-license').value.trim();
+      const msg = el.querySelector('#lic-msg');
+      const btn = el.querySelector('#btn-activate');
+      if (!key) { msg.innerHTML = '<div class="alert alert-error" style="margin-top:8px">Please enter a License Key</div>'; return; }
+      btn.disabled = true; btn.textContent = 'Verifying…';
+      try {
+        const r = await api.post('/api/license/activate', { key });
+        if (r.ok) {
+          licStatus.active = true;
+          licStatus.days_left = r.days_left;
+          status.ai_mode = 'cloud';
+          status.ai_ready = true;
+          status.has_cloud_license = true;
+          status.has_ai_access = true;
+          status.has_api_key = true;
+          const hintEl = el.querySelector('#api-key-hint');
+          const keyInput = el.querySelector('#inp-apikey');
+          if (hintEl) hintEl.textContent = '(当前由 Cloud License 提供 AI，可留空保留)';
+          if (keyInput) keyInput.placeholder = 'Cloud License 已提供 AI，可按需覆盖';
+          msg.innerHTML = `<div class="alert alert-success" style="margin-top:8px">✓ Activated! ${r.days_left} days remaining</div>`;
+          setTimeout(() => setStep(3), 1000);
+        } else {
+          msg.innerHTML = `<div class="alert alert-error" style="margin-top:8px">${r.error}</div>`;
+          btn.disabled = false; btn.textContent = 'Activate Key';
+        }
+      } catch (e) {
+        msg.innerHTML = `<div class="alert alert-error" style="margin-top:8px">${e.message}</div>`;
         btn.disabled = false; btn.textContent = 'Activate Key';
       }
-    } catch (e) {
-      msg.innerHTML = `<div class="alert alert-error" style="margin-top:8px">${e.message}</div>`;
-      btn.disabled = false; btn.textContent = 'Activate Key';
-    }
-  });
+    });
 
-  el.querySelector('#btn-skip-lic').addEventListener('click', () => setStep(3));
-  el.querySelector('#btn-back-3').addEventListener('click', () => setStep(2));
+    el.querySelector('#btn-skip-lic')?.addEventListener('click', () => setStep(3));
+    el.querySelector('#btn-skip-lic-direct')?.addEventListener('click', () => setStep(3));
+  }
+
+  el.querySelector('#btn-back-3').addEventListener('click', () => setStep(versionMode === 'opensource' ? 1 : 2));
   el.querySelector('#btn-next-3').addEventListener('click', () => setStep(4));
   el.querySelector('#btn-skip-3').addEventListener('click', () => setStep(4));
   el.querySelector('#btn-back-4').addEventListener('click', () => setStep(3));
@@ -362,10 +398,27 @@ export async function render(el) {
 }
 
 // ── Returning-user settings panel ─────────────────────────────────────────
-function renderSettings(el, status, licStatus) {
+function renderSettings(el, status, licStatus, versionMode) {
   const licTag = licStatus.active
     ? `<span class="tag tag-green">☁ Cloud ${licStatus.days_left}d</span>`
-    : `<span class="tag" style="color:var(--text-dim)">Not activated</span>`;
+    : licStatus.needs_reactivation
+    ? `<span class="tag" style="color:var(--red)">需重新激活</span>`
+    : licStatus.activation_available
+    ? `<span class="tag" style="color:var(--text-dim)">Not activated</span>`
+    : `<span class="tag" style="color:var(--text-dim)">Self-key only</span>`;
+  const effectiveAiMode = status.ai_mode || (licStatus.active ? 'cloud' : status.has_self_key ? 'self_key' : 'none');
+  const apiHint = effectiveAiMode === 'cloud'
+    ? '(当前由 Cloud License 提供 AI，可留空保留)'
+    : status.has_self_key
+    ? '(已配置，可留空保留)'
+    : versionMode === 'cloud' && licStatus.active
+    ? '(可选)'
+    : '';
+  const apiPlaceholder = effectiveAiMode === 'cloud'
+    ? 'Cloud License 已提供 AI，可按需覆盖'
+    : status.has_self_key
+    ? '留空可保留当前配置'
+    : 'sk-...';
 
   el.innerHTML = `
     <div style="max-width:520px;margin:0 auto">
@@ -395,12 +448,20 @@ function renderSettings(el, status, licStatus) {
       <div class="settings-section">
         <div class="settings-section-title">AI Configuration</div>
         <div class="card">
+          ${versionMode === 'cloud' ? `
           <div class="settings-row">
             <span class="settings-row-label">Cloud License</span>
             ${licTag}
             <a href="#" id="go-license" style="font-size:13px;color:var(--accent);text-decoration:none">Manage →</a>
           </div>
+          ${licStatus.verification_warning ? `
+          <div style="font-size:12px;color:var(--text-dim);margin-top:8px;line-height:1.6">${licStatus.verification_warning}</div>
+          ` : ''}
+          ${!licStatus.active && !licStatus.activation_available ? `
+          <div style="font-size:12px;color:var(--text-dim);margin-top:8px">${licStatus.activation_reason || '当前构建未配置激活服务。'}</div>
+          ` : ''}
           <hr class="divider" style="margin:12px 0">
+          ` : ''}
           <div class="form-group">
             <label>AI Provider</label>
             <select id="inp-backend">
@@ -411,18 +472,9 @@ function renderSettings(el, status, licStatus) {
             </select>
           </div>
           <div class="form-group" style="margin-bottom:0">
-            <label>API Key <span style="color:var(--text-dim)">${status.has_api_key ? '(set — leave blank to keep)' : licStatus.active ? '(optional)' : ''}</span></label>
-            <input id="inp-apikey" type="password" placeholder="${status.has_api_key ? 'Leave blank to keep current' : 'sk-...'}">
+            <label>API Key <span style="color:var(--text-dim)">${apiHint}</span></label>
+            <input id="inp-apikey" type="password" placeholder="${apiPlaceholder}">
             <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Stored locally in .env — never uploaded</div>
-          </div>
-          <hr class="divider" style="margin:16px 0">
-          <div class="form-group" style="margin-bottom:0">
-            <label>Data Storage Location <span style="color:var(--text-dim)">(optional)</span></label>
-            <input id="inp-datadir" type="text"
-              value="${status.data_dir || 'data'}"
-              placeholder="data  or  C:\\Users\\you\\Documents\\EnglishCoach"
-              style="font-family:monospace;font-size:13px">
-            <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Where to save your vocabulary, progress, and AI cache. Default: <code>data/</code> next to the exe.</div>
           </div>
         </div>
       </div>
@@ -490,10 +542,12 @@ function renderSettings(el, status, licStatus) {
     </div>
   `;
 
-  el.querySelector('#go-license').addEventListener('click', (e) => {
-    e.preventDefault();
-    navigate('license');
-  });
+  if (versionMode === 'cloud') {
+    el.querySelector('#go-license')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      navigate('license');
+    });
+  }
 
   // TTS settings — restore from localStorage and wire up live changes
   const rateEl  = el.querySelector('#inp-tts-rate');
@@ -536,12 +590,4 @@ function renderSettings(el, status, licStatus) {
     }
     btn.disabled = false;
   });
-}
-
-function priceBox(label, price, sub, borderColor, textColor) {
-  return `<div style="text-align:center;padding:10px 6px;background:var(--bg3);border-radius:8px;border:1px solid ${borderColor}">
-    <div style="font-size:10px;color:var(--text-dim);margin-bottom:3px">${label}</div>
-    <div style="font-size:17px;font-weight:700;color:${textColor}">${price}</div>
-    ${sub ? `<div style="font-size:10px;color:var(--text-dim);margin-top:2px">${sub}</div>` : ''}
-  </div>`;
 }

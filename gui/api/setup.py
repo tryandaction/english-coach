@@ -79,25 +79,56 @@ def get_data_dir():
 
 @router.get("/status")
 def setup_status():
+    from gui.version import get_version_mode
+    from gui.api.license import build_license_status
+
     cfg = load_config()
+    version_mode = get_version_mode()
     has_profile = False
+    data_dir = _resolve_data_dir(cfg)
     try:
         from core.user_model.profile import UserModel
-        data_dir = _resolve_data_dir(cfg)
         um = UserModel(data_dir / "user.db")
         has_profile = um.get_first_profile() is not None
     except Exception:
         pass
 
-    backend = cfg.get("backend", "")
-    api_key = cfg.get("api_key", "")
-    if not api_key and backend:
-        api_key = os.environ.get(_ENV_KEYS.get(backend, ""), "")
+    runtime = build_license_status(cfg)
+    if version_mode != "cloud":
+        runtime["active"] = False
+        runtime["cloud_license_active"] = False
+        runtime["days_left"] = 0
+        runtime["needs_reactivation"] = False
+        runtime["activation_available"] = False
+        runtime["activation_reason"] = "当前版本不提供 Cloud 激活。"
+        runtime["server_verified"] = None
+        runtime["verification_warning"] = ""
+        runtime["ai_mode"] = "self_key" if runtime["has_self_key"] else "none"
+
+    backend = runtime["self_key_backend"] or str(cfg.get("backend", "") or "").lower()
+    has_ai_access = bool(runtime["ai_ready"])
 
     return {
         "configured": has_profile,
+        "has_profile": has_profile,
+        "version_mode": version_mode,
         "backend": backend,
-        "has_api_key": bool(api_key),
+        "has_api_key": has_ai_access,
+        "has_ai_access": has_ai_access,
+        "has_self_key": runtime["has_self_key"],
+        "has_cloud_license": bool(runtime["cloud_license_active"]),
+        "cloud_license_active": bool(runtime["cloud_license_active"]),
+        "ai_mode": runtime["ai_mode"],
+        "ai_ready": bool(runtime["ai_ready"]),
+        "cloud_ai_ready": bool(runtime.get("cloud_ai_ready", False)),
+        "activation_available": bool(runtime["activation_available"]),
+        "activation_reason": runtime["activation_reason"],
+        "needs_reactivation": bool(runtime["needs_reactivation"]),
+        "server_verified": runtime["server_verified"],
+        "verification_warning": runtime["verification_warning"],
+        "license_days_left": int(runtime["days_left"] or 0),
+        "self_key_backend": runtime["self_key_backend"],
+        "license_error": runtime.get("error", ""),
         "target_exam": cfg.get("user", {}).get("target_exam", ""),
         "name": cfg.get("user", {}).get("name", ""),
         "history_retention_days": int(cfg.get("history_retention_days", 30)),

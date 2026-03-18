@@ -76,7 +76,15 @@ class SM2Engine:
                 context_sentence TEXT DEFAULT '',
                 part_of_speech TEXT DEFAULT '',
                 pronunciation  TEXT DEFAULT '',
-                enriched       INTEGER DEFAULT 0
+                enriched       INTEGER DEFAULT 0,
+                level          INTEGER DEFAULT 2,
+                frequency      INTEGER DEFAULT 5000,
+                category       TEXT DEFAULT 'general',
+                difficulty_score INTEGER DEFAULT 5,
+                exam_type      TEXT DEFAULT 'general',
+                subject_domain TEXT DEFAULT 'general',
+                word_family    TEXT DEFAULT '',
+                usage_notes    TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS srs_cards (
@@ -105,10 +113,25 @@ class SM2Engine:
             CREATE TABLE IF NOT EXISTS word_books (
                 book_id        TEXT PRIMARY KEY,
                 user_id        TEXT NOT NULL,
+                book_key       TEXT DEFAULT '',
                 name           TEXT NOT NULL,
                 description    TEXT DEFAULT '',
                 color          TEXT DEFAULT '#4f8ef7',
                 icon           TEXT DEFAULT '📖',
+                exam           TEXT DEFAULT 'general',
+                source         TEXT DEFAULT 'user',
+                level          TEXT DEFAULT '',
+                topic          TEXT DEFAULT 'general',
+                is_builtin     INTEGER DEFAULT 0,
+                book_group     TEXT DEFAULT '用户自建',
+                recommended_order INTEGER DEFAULT 999,
+                source_label   TEXT DEFAULT '',
+                source_type    TEXT DEFAULT 'manual',
+                series         TEXT DEFAULT '',
+                skill_focus    TEXT DEFAULT '',
+                stage          TEXT DEFAULT '',
+                curation_note  TEXT DEFAULT '',
+                import_format  TEXT DEFAULT '',
                 created_at     TEXT,
                 updated_at     TEXT
             );
@@ -144,18 +167,56 @@ class SM2Engine:
         """)
         # Migrate: add new columns to existing vocabulary tables
         existing = {r[1] for r in self._db.execute("PRAGMA table_info(vocabulary)").fetchall()}
-        for col, default in [
-            ("synonyms",         "''"),
-            ("antonyms",         "''"),
-            ("derivatives",      "''"),
-            ("collocations",     "''"),
-            ("context_sentence", "''"),
-            ("part_of_speech",   "''"),
-            ("pronunciation",    "''"),
-            ("enriched",         "0"),
+        for col, col_type, default in [
+            ("synonyms",         "TEXT", "''"),
+            ("antonyms",         "TEXT", "''"),
+            ("derivatives",      "TEXT", "''"),
+            ("collocations",     "TEXT", "''"),
+            ("context_sentence", "TEXT", "''"),
+            ("part_of_speech",   "TEXT", "''"),
+            ("pronunciation",    "TEXT", "''"),
+            ("enriched",         "INTEGER", "0"),
+            ("level",            "INTEGER", "2"),
+            ("frequency",        "INTEGER", "5000"),
+            ("category",         "TEXT", "'general'"),
+            ("difficulty_score", "INTEGER", "5"),
+            ("exam_type",        "TEXT", "'general'"),
+            ("subject_domain",   "TEXT", "'general'"),
+            ("word_family",      "TEXT", "''"),
+            ("usage_notes",      "TEXT", "''"),
         ]:
             if col not in existing:
-                self._db.execute(f"ALTER TABLE vocabulary ADD COLUMN {col} TEXT DEFAULT {default}")
+                self._db.execute(f"ALTER TABLE vocabulary ADD COLUMN {col} {col_type} DEFAULT {default}")
+        existing_books = {r[1] for r in self._db.execute("PRAGMA table_info(word_books)").fetchall()}
+        for col, col_type, default in [
+            ("book_key",          "TEXT", "''"),
+            ("exam",              "TEXT", "'general'"),
+            ("source",            "TEXT", "'user'"),
+            ("level",             "TEXT", "''"),
+            ("topic",             "TEXT", "'general'"),
+            ("is_builtin",        "INTEGER", "0"),
+            ("book_group",        "TEXT", "'用户自建'"),
+            ("recommended_order", "INTEGER", "999"),
+            ("source_label",      "TEXT", "''"),
+            ("source_type",       "TEXT", "'manual'"),
+            ("series",            "TEXT", "''"),
+            ("skill_focus",       "TEXT", "''"),
+            ("stage",             "TEXT", "''"),
+            ("curation_note",     "TEXT", "''"),
+            ("import_format",     "TEXT", "''"),
+        ]:
+            if col not in existing_books:
+                self._db.execute(f"ALTER TABLE word_books ADD COLUMN {col} {col_type} DEFAULT {default}")
+        self._db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_word_books_user_key
+               ON word_books(user_id, book_key)
+               WHERE book_key <> ''"""
+        )
+        self._db.execute(
+            """UPDATE word_books
+               SET source='user', book_group='用户自建', source_type='manual'
+               WHERE COALESCE(source, '') = ''"""
+        )
         self._db.commit()
 
     # ------------------------------------------------------------------
@@ -178,16 +239,26 @@ class SM2Engine:
         context_sentence: str = "",
         part_of_speech: str = "",
         pronunciation: str = "",
+        level: int = 2,
+        frequency: int = 5000,
+        category: str = "general",
+        difficulty_score: int = 5,
+        exam_type: str = "general",
+        subject_domain: str = "general",
+        word_family: str = "",
+        usage_notes: str = "",
     ) -> str:
         """Insert word into vocabulary table. Returns word_id."""
         word_id = uuid.uuid4().hex[:12]
         self._db.execute(
             """INSERT OR IGNORE INTO vocabulary
                (word_id, word, definition_en, definition_zh, example, topic, difficulty, source,
-                synonyms, antonyms, derivatives, collocations, context_sentence, part_of_speech, pronunciation)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                synonyms, antonyms, derivatives, collocations, context_sentence, part_of_speech, pronunciation,
+                level, frequency, category, difficulty_score, exam_type, subject_domain, word_family, usage_notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (word_id, word.lower(), definition_en, definition_zh, example, topic, difficulty, source,
-             synonyms, antonyms, derivatives, collocations, context_sentence, part_of_speech, pronunciation),
+             synonyms, antonyms, derivatives, collocations, context_sentence, part_of_speech, pronunciation,
+             level, frequency, category, difficulty_score, exam_type, subject_domain, word_family, usage_notes),
         )
         self._db.commit()
         row = self._db.execute(
@@ -199,7 +270,8 @@ class SM2Engine:
         """Update enrichment fields on an existing vocabulary entry."""
         allowed = {"definition_en", "definition_zh", "example", "synonyms", "antonyms",
                    "derivatives", "collocations", "context_sentence", "part_of_speech",
-                   "pronunciation", "enriched"}
+                   "pronunciation", "enriched", "level", "frequency", "category", "difficulty",
+                   "difficulty_score", "exam_type", "subject_domain", "word_family", "usage_notes"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
@@ -256,6 +328,10 @@ class SM2Engine:
         topic: Optional[str] = None,
         difficulty: Optional[str] = None,
         exam: Optional[str] = None,
+        level: Optional[int] = None,
+        subject_domain: Optional[str] = None,
+        difficulty_score_min: Optional[int] = None,
+        difficulty_score_max: Optional[int] = None,
         limit: int = 20,
     ) -> list[dict]:
         """Return vocabulary words not yet in user's deck."""
@@ -270,21 +346,34 @@ class SM2Engine:
         if difficulty:
             conditions.append("v.difficulty = ?")
             params.append(difficulty)
+        if level:
+            conditions.append("v.level = ?")
+            params.append(level)
+        if subject_domain:
+            conditions.append("v.subject_domain = ?")
+            params.append(subject_domain)
+        if difficulty_score_min is not None:
+            conditions.append("v.difficulty_score >= ?")
+            params.append(difficulty_score_min)
+        if difficulty_score_max is not None:
+            conditions.append("v.difficulty_score <= ?")
+            params.append(difficulty_score_max)
         if exam and exam != "general":
+            # Support both source-based and exam_type-based filtering
+            conditions.append("(v.exam_type = ? OR v.exam_type = 'both' OR v.source LIKE ?)")
             source_prefix = {
                 "toefl": "toefl_%",
                 "gre": "gre_%",
                 "ielts": "ielts_%",
                 "cet": "cet%",
-            }.get(exam)
-            if source_prefix:
-                conditions.append("v.source LIKE ?")
-                params.append(source_prefix)
+            }.get(exam, f"{exam}_%")
+            params.extend([exam, source_prefix])
 
         params.append(limit)
         rows = self._db.execute(
             f"""SELECT v.word_id, v.word, v.definition_en, v.definition_zh,
-                       v.example, v.topic, v.difficulty, v.source
+                       v.example, v.topic, v.difficulty, v.source, v.level,
+                       v.frequency, v.category, v.difficulty_score, v.exam_type, v.subject_domain
                 FROM vocabulary v
                 WHERE {' AND '.join(conditions)}
                 ORDER BY RANDOM() LIMIT ?""",
@@ -354,18 +443,77 @@ class SM2Engine:
     # Word Books
     # ------------------------------------------------------------------
 
-    def create_word_book(self, user_id: str, name: str, description: str = "", color: str = "#4f8ef7", icon: str = "📖") -> dict:
+    def create_word_book(
+        self,
+        user_id: str,
+        name: str,
+        description: str = "",
+        color: str = "#4f8ef7",
+        icon: str = "📖",
+        **metadata,
+    ) -> dict:
         book_id = uuid.uuid4().hex[:16]
         now = datetime.now().isoformat()
+        row = {
+            "book_id": book_id,
+            "user_id": user_id,
+            "book_key": metadata.get("book_key", ""),
+            "name": name,
+            "description": description,
+            "color": color,
+            "icon": icon,
+            "exam": metadata.get("exam", "general"),
+            "source": metadata.get("source", "user"),
+            "level": metadata.get("level", ""),
+            "topic": metadata.get("topic", "general"),
+            "is_builtin": 1 if metadata.get("is_builtin") else 0,
+            "book_group": metadata.get("book_group", "用户自建"),
+            "recommended_order": int(metadata.get("recommended_order", 999)),
+            "source_label": metadata.get("source_label", ""),
+            "source_type": metadata.get("source_type", "manual"),
+            "series": metadata.get("series", ""),
+            "skill_focus": metadata.get("skill_focus", ""),
+            "stage": metadata.get("stage", ""),
+            "curation_note": metadata.get("curation_note", ""),
+            "import_format": metadata.get("import_format", ""),
+            "created_at": now,
+            "updated_at": now,
+        }
         self._db.execute(
-            """INSERT INTO word_books (book_id, user_id, name, description, color, icon, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (book_id, user_id, name, description, color, icon, now, now),
+            """INSERT INTO word_books
+               (book_id, user_id, book_key, name, description, color, icon, exam, source, level, topic,
+                is_builtin, book_group, recommended_order, source_label, source_type,
+                series, skill_focus, stage, curation_note, import_format, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                row["book_id"],
+                row["user_id"],
+                row["book_key"],
+                row["name"],
+                row["description"],
+                row["color"],
+                row["icon"],
+                row["exam"],
+                row["source"],
+                row["level"],
+                row["topic"],
+                row["is_builtin"],
+                row["book_group"],
+                row["recommended_order"],
+                row["source_label"],
+                row["source_type"],
+                row["series"],
+                row["skill_focus"],
+                row["stage"],
+                row["curation_note"],
+                row["import_format"],
+                row["created_at"],
+                row["updated_at"],
+            ),
         )
         self._db.commit()
-        return {"book_id": book_id, "user_id": user_id, "name": name,
-                "description": description, "color": color, "icon": icon,
-                "created_at": now, "updated_at": now, "word_count": 0}
+        row["word_count"] = 0
+        return row
 
     def get_word_books(self, user_id: str) -> list[dict]:
         rows = self._db.execute(
@@ -374,7 +522,7 @@ class SM2Engine:
                LEFT JOIN word_book_words w ON b.book_id = w.book_id
                WHERE b.user_id = ?
                GROUP BY b.book_id
-               ORDER BY b.created_at DESC""",
+               ORDER BY b.is_builtin DESC, b.recommended_order ASC, b.updated_at DESC, b.created_at DESC""",
             (user_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -390,8 +538,23 @@ class SM2Engine:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_word_book_by_key(self, user_id: str, book_key: str) -> Optional[dict]:
+        row = self._db.execute(
+            """SELECT b.*, COUNT(w.id) as word_count
+               FROM word_books b
+               LEFT JOIN word_book_words w ON b.book_id = w.book_id
+               WHERE b.user_id = ? AND b.book_key = ?
+               GROUP BY b.book_id""",
+            (user_id, book_key),
+        ).fetchone()
+        return dict(row) if row else None
+
     def update_word_book(self, book_id: str, user_id: str, **fields) -> bool:
-        allowed = {"name", "description", "color", "icon"}
+        allowed = {
+            "name", "description", "color", "icon", "book_key", "exam", "source", "level",
+            "topic", "is_builtin", "book_group", "recommended_order", "source_label",
+            "source_type", "series", "skill_focus", "stage", "curation_note", "import_format",
+        }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
@@ -405,6 +568,12 @@ class SM2Engine:
         return self._db.execute("SELECT changes()").fetchone()[0] > 0
 
     def delete_word_book(self, book_id: str, user_id: str) -> bool:
+        row = self._db.execute(
+            "SELECT is_builtin FROM word_books WHERE book_id=? AND user_id=?",
+            (book_id, user_id),
+        ).fetchone()
+        if row and int(row["is_builtin"] or 0) == 1:
+            return False
         self._db.execute(
             "DELETE FROM word_book_words WHERE book_id=?", (book_id,)
         )

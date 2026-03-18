@@ -5,8 +5,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from core.vocab.catalog import merge_word_payload, normalize_exam_type, parse_import_payload
 from gui.deps import get_components
-from gui.api.vocab import _card_to_dict, _card_detail, _get_word_source, _source_label, VocabSession, _sessions
+from gui.api.vocab import _card_to_dict, _derive_subject, _get_word_source, _lookup_existing_word, VocabSession, _sessions
 
 import time
 import uuid
@@ -52,9 +53,36 @@ class StartSessionRequest(BaseModel):
     max_cards: int = 20
 
 
+class ImportValidateRequest(BaseModel):
+    payload: str
+    format: str = "auto"
+
+
+class ImportBookRequest(BaseModel):
+    payload: str
+    format: str = "auto"
+    book_id: Optional[str] = None
+    book_name: str = ""
+    description: str = ""
+    color: str = "#4f8ef7"
+    icon: str = "📥"
+
+
 # ------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------
+
+
+def _book_due_today(srs, user_id: str, book_id: str) -> int:
+    from datetime import date
+
+    today = date.today().isoformat()
+    return srs._db.execute(
+        """SELECT COUNT(*) FROM srs_cards c
+           JOIN word_book_words w ON w.word_id = c.word_id AND w.book_id = ?
+           WHERE c.user_id = ? AND c.due_date <= ?""",
+        (book_id, user_id, today),
+    ).fetchone()[0]
 
 @router.get("")
 def list_books():
@@ -62,17 +90,8 @@ def list_books():
     if not profile:
         raise HTTPException(400, "No profile")
     books = srs.get_word_books(profile.user_id)
-    # Attach due_today count per book
-    from datetime import date
-    today = date.today().isoformat()
     for b in books:
-        due = srs._db.execute(
-            """SELECT COUNT(*) FROM srs_cards c
-               JOIN word_book_words w ON w.word_id = c.word_id AND w.book_id = ?
-               WHERE c.user_id = ? AND c.due_date <= ?""",
-            (b["book_id"], profile.user_id, today),
-        ).fetchone()[0]
-        b["due_today"] = due
+        b["due_today"] = _book_due_today(srs, profile.user_id, b["book_id"])
     return books
 
 
@@ -89,6 +108,9 @@ def create_book(req: CreateBookRequest):
         description=req.description.strip(),
         color=req.color,
         icon=req.icon,
+        source="user",
+        source_type="manual",
+        book_group="用户自建",
     )
     return book
 
@@ -101,6 +123,7 @@ def get_book(book_id: str):
     book = srs.get_word_book(book_id, profile.user_id)
     if not book:
         raise HTTPException(404, "Word book not found")
+    book["due_today"] = _book_due_today(srs, profile.user_id, book_id)
     return book
 
 
@@ -109,6 +132,11 @@ def update_book(book_id: str, req: UpdateBookRequest):
     kb, srs, user_model, ai, profile = get_components()
     if not profile:
         raise HTTPException(400, "No profile")
+    book = srs.get_word_book(book_id, profile.user_id)
+    if not book:
+        raise HTTPException(404, "Word book not found")
+    if int(book.get("is_builtin") or 0):
+        raise HTTPException(403, "Built-in word books cannot be edited")
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(400, "Nothing to update")
@@ -123,6 +151,11 @@ def delete_book(book_id: str):
     kb, srs, user_model, ai, profile = get_components()
     if not profile:
         raise HTTPException(400, "No profile")
+    book = srs.get_word_book(book_id, profile.user_id)
+    if not book:
+        raise HTTPException(404, "Word book not found")
+    if int(book.get("is_builtin") or 0):
+        raise HTTPException(403, "Built-in word books cannot be deleted")
     ok = srs.delete_word_book(book_id, profile.user_id)
     if not ok:
         raise HTTPException(404, "Word book not found")
@@ -137,6 +170,7 @@ def list_words(book_id: str, limit: int = 200, offset: int = 0):
     book = srs.get_word_book(book_id, profile.user_id)
     if not book:
         raise HTTPException(404, "Word book not found")
+    book["due_today"] = _book_due_today(srs, profile.user_id, book_id)
     words = srs.get_book_words(book_id, profile.user_id, limit=limit, offset=offset)
     return {"book": book, "words": words, "total": book["word_count"]}
 
@@ -149,6 +183,8 @@ def add_word(book_id: str, req: AddWordRequest):
     book = srs.get_word_book(book_id, profile.user_id)
     if not book:
         raise HTTPException(404, "Word book not found")
+    if int(book.get("is_builtin") or 0):
+        raise HTTPException(403, "Built-in word books are read-only")
 
     if req.word_id:
         # Add existing vocab word
@@ -205,8 +241,169 @@ def remove_word(book_id: str, word_id: str):
     book = srs.get_word_book(book_id, profile.user_id)
     if not book:
         raise HTTPException(404, "Word book not found")
+    if int(book.get("is_builtin") or 0):
+        raise HTTPException(403, "Built-in word books are read-only")
     srs.remove_word_from_book(book_id, word_id)
     return {"ok": True}
+
+
+@router.post("/import/validate")
+def validate_import(req: ImportValidateRequest):
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+    try:
+        parsed = parse_import_payload(req.payload, req.format)
+    except Exception as exc:
+        raise HTTPException(400, f"Import parse failed: {exc}")
+
+    existing_words = 0
+    existing_user_words = 0
+    preview = []
+    for row in parsed["words"][:8]:
+        existing = _lookup_existing_word(srs, row["word"])
+        if existing:
+            existing_words += 1
+            if (existing["source"] or "").lower() == "user":
+                existing_user_words += 1
+        preview.append(
+            {
+                "word": row["word"],
+                "definition_en": row["definition_en"],
+                "exists": existing is not None,
+                "source": existing["source"] if existing else "",
+            }
+        )
+
+    return {
+        "ok": True,
+        "format": parsed["format"],
+        "book": parsed["book"],
+        "errors": parsed["errors"],
+        "warnings": parsed["warnings"],
+        "stats": {
+            **parsed["stats"],
+            "existing_words": existing_words,
+            "existing_user_words": existing_user_words,
+            "new_words": max(0, parsed["stats"]["unique_words"] - existing_words),
+        },
+        "merge_rules": [
+            "按 word 的小写形式去重。",
+            "用户自建词条不会被覆盖，只会复用并加入词书。",
+            "已有内置词条会补充更完整字段，但不会因较差内容被降级。",
+        ],
+        "preview": preview,
+    }
+
+
+@router.post("/import")
+def import_book(req: ImportBookRequest):
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+    try:
+        parsed = parse_import_payload(req.payload, req.format)
+    except Exception as exc:
+        raise HTTPException(400, f"Import parse failed: {exc}")
+    if parsed["errors"]:
+        raise HTTPException(400, "Import has validation errors")
+
+    if req.book_id:
+        target_book = srs.get_word_book(req.book_id, profile.user_id)
+        if not target_book:
+            raise HTTPException(404, "Word book not found")
+        if int(target_book.get("is_builtin") or 0):
+            raise HTTPException(403, "Cannot import into built-in word books")
+    else:
+        target_book = srs.create_word_book(
+            user_id=profile.user_id,
+            name=req.book_name.strip() or parsed["book"].get("name") or "Imported Vocabulary",
+            description=req.description.strip() or parsed["book"].get("description", ""),
+            color=req.color,
+            icon=req.icon,
+            exam=normalize_exam_type(parsed["book"].get("exam", "general")),
+            source="user_import",
+            level=parsed["book"].get("level", ""),
+            topic=parsed["book"].get("topic", "general"),
+            source_label=f"User import ({parsed['format']})",
+            source_type="import",
+            import_format=parsed["format"],
+            book_group="用户自建",
+        )
+
+    exam_type = normalize_exam_type(parsed["book"].get("exam", "general"))
+    topic = parsed["book"].get("topic", "general")
+    subject_domain = _derive_subject(topic, parsed["book"].get("source", "user_import"))
+    difficulty = parsed["book"].get("level", "B1")
+    difficulty_upper = str(difficulty).upper()
+    level = 3 if difficulty_upper.startswith("C") else 2 if difficulty_upper.startswith("B") else 1
+    difficulty_score = 7 if level >= 3 else 5 if level == 2 else 3
+
+    created_words = 0
+    reused_words = 0
+    reused_user_words = 0
+    added_to_book = 0
+
+    for row in parsed["words"]:
+        existing = _lookup_existing_word(srs, row["word"])
+        if not existing:
+            word_id = srs.add_word(
+                word=row["word"],
+                definition_en=row["definition_en"],
+                definition_zh=row["definition_zh"],
+                example=row["example"],
+                topic=topic,
+                difficulty=difficulty,
+                source="user",
+                synonyms=row["synonyms"],
+                antonyms=row["antonyms"],
+                derivatives=row["derivatives"],
+                collocations=row["collocations"],
+                context_sentence=row["context_sentence"],
+                part_of_speech=row["part_of_speech"],
+                pronunciation=row["pronunciation"],
+                level=level,
+                category=topic,
+                difficulty_score=difficulty_score,
+                exam_type=exam_type,
+                subject_domain=subject_domain,
+                usage_notes=row["usage_notes"],
+            )
+            created_words += 1
+        else:
+            word_id = existing["word_id"]
+            reused_words += 1
+            if (existing["source"] or "").lower() == "user":
+                reused_user_words += 1
+            updates = merge_word_payload(
+                dict(existing),
+                row,
+                exam_type=exam_type,
+                topic=topic,
+                subject_domain=subject_domain,
+                difficulty=difficulty,
+                level=level,
+                difficulty_score=difficulty_score,
+            )
+            if updates:
+                srs.update_word_fields(word_id, **updates)
+        srs.enroll_words(profile.user_id, [word_id])
+        if srs.add_word_to_book(target_book["book_id"], word_id):
+            added_to_book += 1
+
+    return {
+        "ok": True,
+        "format": parsed["format"],
+        "book": srs.get_word_book(target_book["book_id"], profile.user_id),
+        "stats": {
+            "imported_rows": parsed["stats"]["rows"],
+            "valid_words": parsed["stats"]["valid_words"],
+            "created_words": created_words,
+            "reused_words": reused_words,
+            "reused_user_words": reused_user_words,
+            "added_to_book": added_to_book,
+        },
+    }
 
 
 @router.get("/search/vocab")

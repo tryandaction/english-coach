@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from gui.deps import get_components, load_config
+from gui.deps import _CONFIG_PATH, get_components, load_config
 from modes.chat import _TOPIC_STARTERS, EXAM_MODES
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -126,10 +126,17 @@ def update_config(session_id: str, req: ConfigRequest):
     env_var = _KEY_ENV.get(req.backend)
     key = os.environ.get(env_var, "") if env_var else ""
 
+    license_cfg = None
     # Cloud license covers DeepSeek
     if not key and req.backend == "deepseek":
-        from gui.license import get_cloud_api_key
-        key = get_cloud_api_key() or ""
+        from gui.license import get_license_ai_config
+
+        data_dir = Path(cfg.get("data_dir", "data"))
+        if not data_dir.is_absolute():
+            data_dir = _CONFIG_PATH.parent / data_dir
+        license_cfg = get_license_ai_config(data_dir)
+        if license_cfg:
+            key = license_cfg["api_key"]
 
     if not key:
         current = cfg.get("backend", "deepseek")
@@ -143,7 +150,7 @@ def update_config(session_id: str, req: ConfigRequest):
         cache_db_path=str(Path(data_dir) / "ai_cache.db"),
         default_model=default_m,
         writing_model=writing_m,
-        base_url=_BACKENDS[req.backend],
+        base_url=license_cfg["base_url"] if license_cfg else _BACKENDS[req.backend],
     )
     return {"ok": True, "backend": req.backend}
 

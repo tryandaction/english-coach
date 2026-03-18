@@ -114,7 +114,7 @@ _WORD_TARGETS = {
 
 # Task type labels per exam
 _TASK_TYPES = {
-    "toefl":   [("independent", "Independent (Task 2)"), ("integrated", "Integrated (Task 1)")],
+    "toefl":   [("independent", "Independent (Task 2)"), ("integrated", "Integrated (Task 1)"), ("build_sentence", "Build a Sentence (NEW 2026)"), ("write_email", "Write an Email (NEW 2026)"), ("academic_discussion", "Academic Discussion (NEW 2026)")],
     "ielts":   [("task2", "Task 2: Essay"), ("task1", "Task 1: Report")],
     "gre":     [("issue", "Issue Essay"), ("argument", "Argument Essay")],
     "cet":     [("essay", "作文 Essay"), ("translation", "翻译 Translation")],
@@ -139,9 +139,12 @@ def get_prompt(exam: Optional[str] = None, task_type: Optional[str] = None):
     scale = _SCORE_SCALES.get(target, _SCORE_SCALES["general"])
     task_types = _TASK_TYPES.get(target, _TASK_TYPES["general"])
 
-    # Try to get an AI-generated prompt from warehouse first
+    # Try to get an AI-generated prompt from warehouse first.
+    # Important: when task_type is explicitly requested (e.g., tab switching),
+    # do not use warehouse prompts because they are not task-specific.
     ai_prompt = None
-    if ai:
+    use_ai_prompt = ai and not task_type
+    if use_ai_prompt:
         try:
             rows = kb.get_by_type(
                 content_type="writing",
@@ -241,3 +244,73 @@ def submit_essay(req: WriteRequest):
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ── TOEFL 2026 New Writing Task Types ────────────────────────────────────────
+
+class BuildSentenceRequest(BaseModel):
+    num_items: int = 5
+    cefr_level: Optional[str] = None
+
+
+class WriteEmailRequest(BaseModel):
+    cefr_level: Optional[str] = None
+
+
+class AcademicDiscussionRequest(BaseModel):
+    cefr_level: Optional[str] = None
+
+
+@router.post("/toefl2026/build-sentence")
+def generate_build_sentence(req: BuildSentenceRequest):
+    """Generate TOEFL 2026 'Build a Sentence' writing task."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    try:
+        result = ai.generate_build_sentence_task(cefr, req.num_items)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl2026/write-email")
+def generate_write_email(req: WriteEmailRequest):
+    """Generate TOEFL 2026 'Write an Email' writing task."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    try:
+        result = ai.generate_write_email_task(cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl2026/academic-discussion")
+def generate_academic_discussion(req: AcademicDiscussionRequest):
+    """Generate TOEFL 2026 'Academic Discussion' writing task."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    try:
+        result = ai.generate_academic_discussion_task(cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+

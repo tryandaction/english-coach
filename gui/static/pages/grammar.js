@@ -53,17 +53,19 @@ export async function render(el) {
   let exam = 'general';
   try {
     const prog = await api.get('/api/progress');
+    if (api.isAborted() || !el.isConnected) return;
     exam = prog.target_exam || 'general';
   } catch {}
   _session.exam = exam;
 
   const badge = el.querySelector('#exam-badge-grammar');
-  if (exam && exam !== 'general') {
+  if (badge && exam && exam !== 'general') {
     badge.innerHTML = `<span class="exam-badge exam-${exam}">${exam.toUpperCase()}</span>`;
   }
 
   try {
     const r = await api.get(`/api/grammar/categories?exam=${exam}`);
+    if (api.isAborted() || !el.isConnected) return;
     _categories = r.categories || [];
   } catch {}
 
@@ -118,6 +120,7 @@ function _renderCategoryButtons(el) {
 
 async function loadQuestion(el) {
   const area = el.querySelector('#drill-area');
+  if (!area) return;
 
   // Try pool first — instant, no spinner
   const pooled = _qPool.pop();
@@ -138,12 +141,16 @@ async function loadQuestion(el) {
     else if (_session.exam && _session.exam !== 'general') params.push(`exam=${_session.exam}`);
     if (params.length) url += '?' + params.join('&');
     const q = await api.get(url);
+
+    if (api.isAborted() || !el.isConnected) return;
+
     _session.current = q;
     renderQuestion(el, q);
     ttsPreload && ttsPreload(q.sentence.replace('___', 'blank'));
     _qPool.refill(_session.category, _session.exam);
   } catch (e) {
-    area.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    if (api.isAborted() || !el.isConnected) return;
+    if (area) area.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
@@ -197,24 +204,31 @@ async function selectAnswer(el, q, idx, btn) {
       explanation: q.explanation,
     });
 
+    if (api.isAborted() || !el.isConnected) return;
+
     _session.total++;
     if (result.correct) {
       _session.correct++;
       btn.classList.add('correct');
     } else {
       btn.classList.add('wrong');
-      el.querySelectorAll('.choice-btn')[result.correct_index].classList.add('correct');
+      const correctBtn = el.querySelectorAll('.choice-btn')[result.correct_index];
+      if (correctBtn) correctBtn.classList.add('correct');
     }
 
-    el.querySelector('#expl').classList.add('show');
-    el.querySelector('#btn-next').classList.remove('hidden');
+    const explEl = el.querySelector('#expl');
+    const nextBtn = el.querySelector('#btn-next');
+    if (explEl) explEl.classList.add('show');
+    if (nextBtn) nextBtn.classList.remove('hidden');
 
     const stats = el.querySelector('#session-stats');
-    stats.classList.remove('hidden');
-    el.querySelector('#stat-correct').textContent = _session.correct;
-    el.querySelector('#stat-total').textContent = _session.total;
+    const correctEl = el.querySelector('#stat-correct');
+    const totalEl = el.querySelector('#stat-total');
+    if (stats) stats.classList.remove('hidden');
+    if (correctEl) correctEl.textContent = _session.correct;
+    if (totalEl) totalEl.textContent = _session.total;
 
-    if (_session.total >= 5 && !el.querySelector('#btn-finish')) {
+    if (_session.total >= 5 && !el.querySelector('#btn-finish') && stats) {
       const finishBtn = document.createElement('button');
       finishBtn.id = 'btn-finish';
       finishBtn.className = 'btn btn-outline';
@@ -224,6 +238,7 @@ async function selectAnswer(el, q, idx, btn) {
       stats.appendChild(finishBtn);
     }
   } catch (e) {
+    if (api.isAborted() || !el.isConnected) return;
     console.error(e);
   }
 }

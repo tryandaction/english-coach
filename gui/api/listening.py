@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from gui.deps import get_components
+from gui.deps import get_components, get_content_dir
 
 router = APIRouter(prefix="/api/listening", tags=["listening"])
 
@@ -27,7 +27,49 @@ _VOICE_A    = "en-US-AriaNeural"
 _VOICE_B    = "en-US-GuyNeural"
 _VOICE_MONO = "en-GB-SoniaNeural"
 
-_CONTENT_DIR = Path(__file__).parent.parent.parent / "content" / "listening"
+_CONTENT_DIR = get_content_dir() / "listening"
+
+
+# ── TOEFL Listening Question Type Endpoints ──────────────────────────────────
+
+class TOEFLListeningRequest(BaseModel):
+    question_types: list[str]  # e.g., ["gist_content", "detail", "function"]
+    dialogue_type: str = "conversation"  # "conversation" or "monologue"
+    cefr_level: Optional[str] = None
+
+
+@router.post("/toefl/generate-by-type")
+def generate_toefl_listening_by_type(req: TOEFLListeningRequest):
+    """
+    Generate TOEFL listening exercise with specific question types.
+    Supports all 8 TOEFL listening question types:
+    - gist_content, gist_purpose, detail, function, attitude, organization, connecting, inference
+    """
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    # Validate question types
+    valid_types = {"gist_content", "gist_purpose", "detail", "function", "attitude", "organization", "connecting", "inference"}
+    invalid = set(req.question_types) - valid_types
+    if invalid:
+        raise HTTPException(400, f"Invalid question types: {invalid}")
+
+    try:
+        result = ai.generate_listening_dialogue(
+            cefr_level=cefr,
+            exam="toefl",
+            dialogue_type=req.dialogue_type,
+            question_types=req.question_types,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
 
 # ── Pool database ─────────────────────────────────────────────────────────────
 # Pool lives in a SQLite file next to the app data directory.
@@ -45,14 +87,14 @@ def _get_pool_db() -> sqlite3.Connection:
     if _pool_db is not None:
         return _pool_db
     try:
-        from gui.deps import load_config
+        from gui.deps import load_config, _CONFIG_PATH
         cfg = load_config()
         raw = cfg.get("data_dir", "data")
         from pathlib import Path as _P
-        import sys
-        base = _P(sys.executable).parent if getattr(sys, "frozen", False) else _P(".")
-        data_dir = _P(raw) if _P(raw).is_absolute() else base / raw
-        data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = _P(raw) if _P(raw).is_absolute() else _CONFIG_PATH.parent / raw
+        # Only create directory if it doesn't exist (user may have set custom path)
+        if not data_dir.exists():
+            data_dir.mkdir(parents=True, exist_ok=True)
         db_path = data_dir / "listening_pool.db"
     except Exception:
         db_path = Path(tempfile.gettempdir()) / "listening_pool.db"
@@ -150,7 +192,7 @@ def _load_builtin_script(exam: str, dialogue_type: str, cefr: str) -> Optional[d
     candidates = []
     for f in _CONTENT_DIR.glob("*.md"):
         try:
-            text = f.read_text(encoding="utf-8")
+            text = f.read_text(encoding="utf-8").replace("\r\n", "\n")
             fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
             if not fm_match:
                 continue
@@ -177,7 +219,7 @@ def _load_builtin_script(exam: str, dialogue_type: str, cefr: str) -> Optional[d
     if not candidates:
         for f in _CONTENT_DIR.glob("*.md"):
             try:
-                text = f.read_text(encoding="utf-8")
+                text = f.read_text(encoding="utf-8").replace("\r\n", "\n")
                 fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
                 if not fm_match:
                     continue
@@ -195,14 +237,16 @@ def _load_builtin_script(exam: str, dialogue_type: str, cefr: str) -> Optional[d
         return None
 
     f, meta, body = random.choice(candidates)
-    q_match = re.search(r"questions:\s*\n(\[.*?\])", body, re.DOTALL)
     questions = []
-    if q_match:
+    marker = re.search(r"\nquestions:\s*\n", body)
+    if marker:
+        script_text = body[:marker.start()].strip()
+        questions_text = body[marker.end():].strip()
         try:
-            questions = json.loads(q_match.group(1))
+            parsed_questions = json.loads(questions_text)
+            questions = parsed_questions if isinstance(parsed_questions, list) else []
         except Exception:
-            pass
-        script_text = body[:q_match.start()].strip()
+            questions = []
     else:
         script_text = body.strip()
 
@@ -288,28 +332,25 @@ _COMBOS = [
 
 async def _replenish_pool(target_exam: str = "general", target_dtype: str = "conversation",
                           cefr: str = "B1") -> None:
-    """Fill pool up to _POOL_TARGET for the given combo, using built-in scripts."""
-    combos_to_fill = [(target_exam, target_dtype)] + [
-        (e, d) for e, d in _COMBOS if (e, d) != (target_exam, target_dtype)
-    ]
-    for exam, dtype in combos_to_fill:
-        current = _pool_count(exam, dtype)
-        needed  = _POOL_TARGET - current
-        if needed <= 0:
-            continue
-        for _ in range(needed):
-            data = _load_builtin_script(exam, dtype, cefr)
-            if not data:
-                break
-            audio_path, timestamps = await _synthesize_audio(data["script"], dtype)
-            _pool_push(exam, dtype, data.get("difficulty", cefr), data, audio_path, timestamps)
-            await asyncio.sleep(0)  # yield to event loop
+    """Fill pool up to _POOL_TARGET for ONE (exam, dtype) combo only."""
+    current = _pool_count(target_exam, target_dtype)
+    needed  = _POOL_TARGET - current
+    if needed <= 0:
+        return
+    for _ in range(needed):
+        data = _load_builtin_script(target_exam, target_dtype, cefr)
+        if not data:
+            break
+        audio_path, timestamps = await _synthesize_audio(data["script"], target_dtype)
+        _pool_push(target_exam, target_dtype, data.get("difficulty", cefr), data, audio_path, timestamps)
+        await asyncio.sleep(0)  # yield to event loop
 
 
 async def _maybe_replenish(exam: str, dtype: str, cefr: str) -> None:
     """Trigger background replenishment if pool is running low."""
     global _replenish_task
-    if _pool_count(exam, dtype) < _POOL_MIN:
+    current = _pool_count(exam, dtype)
+    if current < _POOL_MIN:
         if _replenish_task is None or _replenish_task.done():
             _replenish_task = asyncio.create_task(_replenish_pool(exam, dtype, cefr))
 
@@ -318,7 +359,7 @@ async def _maybe_replenish(exam: str, dtype: str, cefr: str) -> None:
 
 async def seed_pool_on_startup() -> None:
     """Pre-synthesise sessions in the background so first click is instant.
-    Prioritises the user's target exam, then fills remaining combos."""
+    Launches one concurrent task per (exam, dtype) combo that needs filling."""
     try:
         from gui.deps import get_components
         _, _, _, _, profile = get_components()
@@ -328,17 +369,25 @@ async def seed_pool_on_startup() -> None:
         target_exam = "general"
         cefr = "B1"
 
-    # Seed user's exam first (both dialogue types), then general
-    priority = [(target_exam, d) for _, d in _COMBOS if _ == target_exam]
-    if not priority:
-        priority = [(target_exam, "conversation")]
-    # Always include general as fallback
-    for d in ["conversation", "monologue"]:
-        if ("general", d) not in priority:
-            priority.append(("general", d))
+    # Build priority list: user's exam first, then general, then rest
+    priority: list[tuple[str, str]] = []
+    for dtype in ["conversation", "monologue"]:
+        combo = (target_exam, dtype)
+        if combo not in priority:
+            priority.append(combo)
+    for dtype in ["conversation", "monologue"]:
+        combo = ("general", dtype)
+        if combo not in priority:
+            priority.append(combo)
+    for exam, dtype in _COMBOS:
+        combo = (exam, dtype)
+        if combo not in priority:
+            priority.append(combo)
 
+    # Launch one independent background task per combo — they run concurrently
     for exam, dtype in priority:
-        asyncio.create_task(_replenish_pool(exam, dtype, cefr))
+        if _pool_count(exam, dtype) < _POOL_TARGET:
+            asyncio.create_task(_replenish_pool(exam, dtype, cefr))
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
@@ -392,7 +441,7 @@ async def start_listening(
         "exam": target_exam,
     }
 
-    # Replenish pool in background
+    # Replenish pool in background immediately after session starts
     asyncio.create_task(_maybe_replenish(target_exam, dialogue_type, cefr))
 
     return {
@@ -435,13 +484,9 @@ async def get_audio(session_id: str):
     sess["play_count"] += 1
     path = sess["audio_path"]
 
-    def iter_file():
-        with open(path, "rb") as f:
-            while chunk := f.read(8192):
-                yield chunk
-
-    return StreamingResponse(
-        iter_file(),
+    from fastapi.responses import FileResponse as _FileResponse
+    return _FileResponse(
+        path,
         media_type="audio/mpeg",
         headers={"X-Play-Count": str(sess["play_count"]), "X-Max-Plays": str(_MAX_PLAYS)},
     )

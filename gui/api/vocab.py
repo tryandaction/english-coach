@@ -5,16 +5,32 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from gui.deps import get_components
+from core.vocab.catalog import (
+    builtin_book_blueprint,
+    derive_subject,
+    merge_word_payload,
+    normalize_difficulty,
+    normalize_exam_type,
+    normalize_word,
+    parse_vocab_markdown,
+    scan_content_library,
+    should_include_builtin_book,
+)
+from gui.deps import _CONFIG_PATH, get_components, get_content_dir, load_config
 
 router = APIRouter(prefix="/api/vocab", tags=["vocab"])
 
-_VOCAB_CONTENT_DIR = Path(__file__).parent.parent.parent / "content" / "vocab"
+_CONTENT_ROOT = get_content_dir()
+_VOCAB_CONTENT_DIRS = [
+    _CONTENT_ROOT / "vocab",
+    _CONTENT_ROOT / "vocab_selected",
+    _CONTENT_ROOT / "vocab_expanded",
+]
 
 
 @dataclass
@@ -29,6 +45,34 @@ class VocabSession:
 
 
 _sessions: dict[str, VocabSession] = {}
+
+
+def _normalize_exam_type(value: str) -> str:
+    return normalize_exam_type(value)
+
+
+def _normalize_difficulty(value: str) -> str:
+    return normalize_difficulty(value)
+
+
+def _derive_subject(topic: str, source: str) -> str:
+    return derive_subject(topic, source)
+
+
+def _parse_vocab_markdown(md_file: Path) -> tuple[dict, list[dict]]:
+    return parse_vocab_markdown(md_file=md_file)
+
+
+def _build_builtin_book(source: str, exam_type: str) -> tuple[str, str, str]:
+    blueprint = builtin_book_blueprint(source, {"exam": exam_type})
+    return (blueprint["name"], blueprint["icon"], blueprint["color"])
+
+
+def _lookup_existing_word(srs, word: str):
+    return srs._db.execute(
+        "SELECT * FROM vocabulary WHERE word=?",
+        (normalize_word(word),),
+    ).fetchone()
 
 
 def _card_to_dict(card) -> dict:
@@ -58,6 +102,139 @@ def _card_detail(card) -> dict:
         "pronunciation": getattr(card, "pronunciation", ""),
     })
     return d
+
+
+def _scan_builtin_library() -> dict[str, Any]:
+    return scan_content_library(_VOCAB_CONTENT_DIRS)
+
+
+def _resolve_data_dir() -> str:
+    cfg = load_config() or {}
+    raw = cfg.get("data_dir", "data")
+    path = Path(raw)
+    resolved = path if path.is_absolute() else _CONFIG_PATH.parent / path
+    return str(resolved.resolve())
+
+
+def _content_exam_summary(catalog: dict[str, Any], exam: str) -> dict[str, Any]:
+    normalized_exam = _normalize_exam_type(exam)
+    books = [
+        book for book in catalog.get("books", [])
+        if normalized_exam == "both" or book.get("exam") == normalized_exam
+    ]
+    words: set[str] = set()
+    subjects: dict[str, set[str]] = {}
+    levels: dict[int, set[str]] = {level: set() for level in range(1, 5)}
+    for book in books:
+        for file_info in book.get("files", []):
+            md_file = Path(file_info["path"])
+            if not md_file.exists():
+                continue
+            fm, rows = _parse_vocab_markdown(md_file)
+            difficulty = _normalize_difficulty(fm.get("difficulty", book.get("level", "B1")))
+            level = 3 if difficulty.startswith("C") else 2 if difficulty.startswith("B") else 1
+            subject = _derive_subject(fm.get("topic", book.get("topic", "general")), fm.get("source", md_file.stem))
+            for row in rows:
+                word = normalize_word(row.get("word", ""))
+                if not word:
+                    continue
+                words.add(word)
+                levels[level].add(word)
+                subjects.setdefault(subject, set()).add(word)
+    return {
+        "exam": normalized_exam,
+        "total_words": len(words),
+        "by_level": [{"level": level, "word_count": len(levels[level])} for level in range(1, 5)],
+        "by_subject": sorted(
+            (
+                {"subject_domain": subject, "word_count": len(subject_words)}
+                for subject, subject_words in subjects.items()
+            ),
+            key=lambda item: item["word_count"],
+            reverse=True,
+        ),
+    }
+
+
+def _db_vocab_stats(srs) -> dict[str, Any]:
+    rows = srs._db.execute(
+        """SELECT
+               COUNT(*) AS total_rows,
+               COUNT(DISTINCT word) AS unique_words,
+               SUM(CASE WHEN source='user' THEN 1 ELSE 0 END) AS user_words,
+               SUM(CASE WHEN source!='user' THEN 1 ELSE 0 END) AS builtin_words
+           FROM vocabulary"""
+    ).fetchone()
+    exam_rows = srs._db.execute(
+        """SELECT exam_type AS exam, COUNT(DISTINCT word) AS word_count
+           FROM vocabulary
+           GROUP BY exam_type
+           ORDER BY word_count DESC"""
+    ).fetchall()
+    group_rows = srs._db.execute(
+        """SELECT book_group, COUNT(*) AS book_count, SUM(word_count) AS word_count
+           FROM (
+               SELECT b.book_group, COUNT(w.id) AS word_count
+               FROM word_books b
+               LEFT JOIN word_book_words w ON b.book_id = w.book_id
+               GROUP BY b.book_id
+           )
+           GROUP BY book_group"""
+    ).fetchall()
+    return {
+        "total_rows": rows["total_rows"] if rows else 0,
+        "unique_words": rows["unique_words"] if rows else 0,
+        "user_words": rows["user_words"] if rows else 0,
+        "builtin_words": rows["builtin_words"] if rows else 0,
+        "by_exam": [dict(r) for r in exam_rows],
+        "by_book_group": [dict(r) for r in group_rows],
+    }
+
+
+def _sync_builtin_book(profile, srs, blueprint: dict[str, Any], word_ids: list[str]) -> dict | None:
+    if not profile:
+        return None
+    book = srs.get_word_book_by_key(profile.user_id, blueprint["book_key"])
+    payload = {
+        "book_key": blueprint["book_key"],
+        "exam": blueprint["exam"],
+        "source": blueprint["source"],
+        "level": blueprint["level"],
+        "topic": blueprint["topic"],
+        "is_builtin": 1,
+        "book_group": blueprint["book_group"],
+        "recommended_order": blueprint["recommended_order"],
+        "source_label": blueprint["source_label"],
+        "source_type": blueprint["source_type"],
+        "series": blueprint.get("series", ""),
+        "skill_focus": blueprint.get("skill_focus", ""),
+        "stage": blueprint.get("stage", ""),
+        "curation_note": blueprint.get("curation_note", ""),
+    }
+    if book:
+        srs.update_word_book(
+            book["book_id"],
+            profile.user_id,
+            name=blueprint["name"],
+            description=blueprint["description"],
+            color=blueprint["color"],
+            icon=blueprint["icon"],
+            **payload,
+        )
+        book_id = book["book_id"]
+    else:
+        book = srs.create_word_book(
+            user_id=profile.user_id,
+            name=blueprint["name"],
+            description=blueprint["description"],
+            color=blueprint["color"],
+            icon=blueprint["icon"],
+            **payload,
+        )
+        book_id = book["book_id"]
+    for word_id in word_ids:
+        srs.add_word_to_book(book_id, word_id)
+    return srs.get_word_book(book_id, profile.user_id)
 
 
 @router.post("/start")
@@ -181,7 +358,7 @@ def rate_card(session_id: str, req: RateRequest):
     }
 
 
-@router.get("/stats")
+@router.get("/deck-stats")
 def deck_stats():
     kb, srs, user_model, ai, profile = get_components()
     if not profile:
@@ -260,95 +437,116 @@ def add_word(req: AddWordRequest):
 
 @router.post("/ingest_builtin")
 def ingest_builtin():
-    """Scan content/vocab/*.md and import words into vocabulary table, then seed default books."""
+    """Import builtin vocabulary and keep user-created data intact."""
     kb, srs, user_model, ai, profile = get_components()
-    if not _VOCAB_CONTENT_DIR.exists():
-        return {"ok": True, "imported": 0, "message": "No vocab content directory"}
+    content_dirs = [path for path in _VOCAB_CONTENT_DIRS if path.exists()]
+    if not content_dirs:
+        return {"ok": True, "imported": 0, "message": "No vocab content directories"}
 
-    total_imported = 0
+    total_processed = 0
+    total_new = 0
+    total_linked_user_words = 0
+    books_synced: dict[str, dict] = {}
     files_processed = []
 
-    # source → (book name, icon, color)
-    _DEFAULT_BOOKS = {
-        "toefl_awl":      ("TOEFL Academic Words", "🎓", "#4f8ef7"),
-        "gre_highfreq":   ("GRE High-Frequency",   "🔬", "#7c5cfc"),
-        "ielts_academic": ("IELTS Academic",        "📖", "#3ecf8e"),
-        "cet4_core":      ("CET-4 Core",            "⭐", "#f5c842"),
-        "cet6_core":      ("CET-6 Core",            "🔥", "#f26b6b"),
-    }
-
-    for md_file in sorted(_VOCAB_CONTENT_DIR.glob("*.md")):
-        text = md_file.read_text(encoding="utf-8")
-        fm: dict = {}
-        body = text
-        if text.startswith("---"):
-            parts = text.split("---", 2)
-            if len(parts) >= 3:
-                for line in parts[1].strip().splitlines():
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        fm[k.strip()] = v.strip()
-                body = parts[2].strip()
-
-        source = fm.get("source", md_file.stem)
-        difficulty = fm.get("difficulty", "B1")
-        topic = fm.get("topic", "general")
-
-        imported = 0
-        word_ids = []
-        for line in body.splitlines():
-            line = line.strip()
-            if not line or line.startswith("word|"):
+    for vocab_dir in content_dirs:
+        for md_file in sorted(vocab_dir.glob("*.md")):
+            fm, rows = _parse_vocab_markdown(md_file)
+            if not should_include_builtin_book(md_file.stem, fm):
                 continue
-            parts = line.split("|")
-            if len(parts) < 3:
+            if not rows:
                 continue
-            word = parts[0].strip().lower()
-            definition_en = parts[1].strip() if len(parts) > 1 else ""
-            definition_zh = parts[2].strip() if len(parts) > 2 else ""
-            example = parts[3].strip() if len(parts) > 3 else ""
-            pos = parts[4].strip() if len(parts) > 4 else ""
-            synonyms = parts[5].strip() if len(parts) > 5 else ""
-            antonyms = parts[6].strip() if len(parts) > 6 else ""
-            if not word or not definition_en:
-                continue
-            wid = srs.add_word(
-                word=word,
-                definition_en=definition_en,
-                definition_zh=definition_zh,
-                example=example,
-                topic=topic,
-                difficulty=difficulty,
-                source=source,
-                synonyms=synonyms,
-                antonyms=antonyms,
-                part_of_speech=pos,
-            )
-            word_ids.append(wid)
-            imported += 1
 
-        total_imported += imported
-        files_processed.append({"file": md_file.name, "words": imported})
+            source = fm.get("source", md_file.stem)
+            difficulty = _normalize_difficulty(fm.get("difficulty", "B1"))
+            topic = fm.get("topic", "general")
+            exam_type = _normalize_exam_type(fm.get("exam", source))
+            subject_domain = _derive_subject(topic, source)
+            level = 3 if difficulty.startswith("C") else 2
+            difficulty_score = 7 if difficulty.startswith("C") else 5 if difficulty.startswith("B2") else 3
+            blueprint = builtin_book_blueprint(md_file.stem, fm, md_file)
 
-        # Seed default word book for this source (once per user)
-        if profile and source in _DEFAULT_BOOKS and word_ids:
-            bname, bicon, bcolor = _DEFAULT_BOOKS[source]
-            existing = srs._db.execute(
-                "SELECT book_id FROM word_books WHERE user_id=? AND name=?",
-                (profile.user_id, bname),
-            ).fetchone()
-            if not existing:
-                book = srs.create_word_book(
-                    user_id=profile.user_id,
-                    name=bname,
-                    description=f"Built-in {bname} word list",
-                    color=bcolor,
-                    icon=bicon,
+            processed = 0
+            word_ids = []
+            linked_user_words = 0
+            new_words = 0
+            for row in rows:
+                incoming = {
+                    **row,
+                    "derivatives": row.get("derivatives", ""),
+                    "collocations": row.get("collocations", ""),
+                    "context_sentence": row.get("context_sentence", ""),
+                    "pronunciation": row.get("pronunciation", ""),
+                    "usage_notes": row.get("usage_notes", ""),
+                }
+                existing = _lookup_existing_word(srs, row["word"])
+                if existing and (existing["source"] or "").lower() == "user":
+                    linked_user_words += 1
+                    word_ids.append(existing["word_id"])
+                    processed += 1
+                    continue
+
+                wid = srs.add_word(
+                    word=row["word"],
+                    definition_en=row["definition_en"],
+                    definition_zh=row["definition_zh"],
+                    example=row["example"],
+                    topic=topic,
+                    difficulty=difficulty,
+                    source=source,
+                    synonyms=row["synonyms"],
+                    antonyms=row["antonyms"],
+                    part_of_speech=row["part_of_speech"],
+                    level=level,
+                    category=topic,
+                    difficulty_score=difficulty_score,
+                    exam_type=exam_type,
+                    subject_domain=subject_domain,
                 )
-                for wid in word_ids:
-                    srs.add_word_to_book(book["book_id"], wid)
+                if not existing:
+                    new_words += 1
+                updates = merge_word_payload(
+                    dict(existing) if existing else None,
+                    incoming,
+                    exam_type=exam_type,
+                    topic=topic,
+                    subject_domain=subject_domain,
+                    difficulty=difficulty,
+                    level=level,
+                    difficulty_score=difficulty_score,
+                )
+                if updates:
+                    srs.update_word_fields(wid, **updates)
+                word_ids.append(wid)
+                processed += 1
 
-    return {"ok": True, "imported": total_imported, "files": files_processed}
+            total_processed += processed
+            total_new += new_words
+            total_linked_user_words += linked_user_words
+            files_processed.append({
+                "dir": vocab_dir.name,
+                "file": md_file.name,
+                "processed_words": processed,
+                "new_words": new_words,
+                "linked_user_words": linked_user_words,
+                "exam": exam_type,
+                "book_key": blueprint["book_key"],
+                "book_name": blueprint["name"],
+            })
+
+            if word_ids and profile:
+                synced = _sync_builtin_book(profile, srs, blueprint, word_ids)
+                if synced:
+                    books_synced[blueprint["book_key"]] = synced
+
+    return {
+        "ok": True,
+        "processed_words": total_processed,
+        "imported": total_new,
+        "linked_user_words": total_linked_user_words,
+        "books_synced": list(books_synced.values()),
+        "files": files_processed,
+    }
 
 
 # ── Tag endpoints ──────────────────────────────────────────────────
@@ -399,3 +597,119 @@ def list_all_tags():
     if not profile:
         raise HTTPException(400, "No profile")
     return srs.get_all_tags(profile.user_id)
+
+
+# ── Professional filtering endpoints ──────────────────────────────
+
+@router.get("/by-level")
+def get_words_by_level(level: int, exam: str = "general", limit: int = 50):
+    """Get vocabulary words by level (1-4 grading system)."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    if level < 1 or level > 4:
+        raise HTTPException(400, "Level must be between 1 and 4")
+
+    words = srs.get_new_words(
+        user_id=profile.user_id,
+        level=level,
+        exam=exam,
+        limit=limit
+    )
+    return {"level": level, "exam": exam, "words": words, "count": len(words)}
+
+
+@router.get("/by-subject")
+def get_words_by_subject(subject: str, exam: str = "general", limit: int = 50):
+    """Get vocabulary words by subject domain (biology, geology, astronomy, etc.)."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    words = srs.get_new_words(
+        user_id=profile.user_id,
+        subject_domain=subject,
+        exam=exam,
+        limit=limit
+    )
+    return {"subject": subject, "exam": exam, "words": words, "count": len(words)}
+
+
+@router.get("/by-difficulty")
+def get_words_by_difficulty(min_score: int = 1, max_score: int = 10, exam: str = "general", limit: int = 50):
+    """Get vocabulary words by difficulty score (1-10 scale)."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    if min_score < 1 or max_score > 10 or min_score > max_score:
+        raise HTTPException(400, "Invalid difficulty range (1-10)")
+
+    words = srs.get_new_words(
+        user_id=profile.user_id,
+        difficulty_score_min=min_score,
+        difficulty_score_max=max_score,
+        exam=exam,
+        limit=limit
+    )
+    return {
+        "difficulty_range": {"min": min_score, "max": max_score},
+        "exam": exam,
+        "words": words,
+        "count": len(words)
+    }
+
+
+@router.get("/subjects")
+def list_subjects(exam: str = "general"):
+    """List available subject domains for an exam."""
+    rows = _content_exam_summary(_scan_builtin_library(), exam).get("by_subject", [])
+    subjects = [{"subject": r["subject_domain"], "word_count": r["word_count"]} for r in rows]
+    return {"exam": exam, "subjects": subjects}
+
+
+@router.get("/stats")
+def get_vocabulary_stats(exam: str = "general"):
+    """Get vocabulary statistics by level, subject, and difficulty."""
+    catalog = _content_exam_summary(_scan_builtin_library(), exam)
+
+    return {
+        "exam": exam,
+        "total_words": catalog.get("total_words", 0),
+        "by_level": catalog.get("by_level", [{"level": level, "word_count": 0} for level in range(1, 5)]),
+        "by_subject": catalog.get("by_subject", [])[:10]
+    }
+
+
+@router.get("/library")
+def get_vocabulary_library():
+    kb, srs, user_model, ai, profile = get_components()
+    content_catalog = _scan_builtin_library()
+    books = srs.get_word_books(profile.user_id) if profile else []
+    books_by_key = {book.get("book_key"): book for book in books if book.get("book_key")}
+    recommended = []
+    for item in content_catalog.get("recommended_path", []):
+        actual = books_by_key.get(item["book_key"])
+        recommended.append(
+            {
+                **item,
+                "is_synced": actual is not None,
+                "book_id": actual.get("book_id") if actual else None,
+                "due_today": actual.get("due_today", 0) if actual else 0,
+            }
+        )
+    return {
+        "setup": {
+            "configured": profile is not None,
+            "has_api_key": ai is not None,
+            "offline_ready": content_catalog.get("stats", {}).get("unique_words", 0) > 0,
+            "data_dir": _resolve_data_dir(),
+            "content_dirs": [str(path.resolve()) for path in _VOCAB_CONTENT_DIRS if path.exists()],
+        },
+        "recommended_path": recommended,
+        "builtin_catalog": content_catalog,
+        "database": _db_vocab_stats(srs),
+        "user_books": [book for book in books if not int(book.get("is_builtin") or 0)],
+        "builtin_books": [book for book in books if int(book.get("is_builtin") or 0)],
+    }

@@ -28,12 +28,50 @@ class KnowledgeBase:
 
     def __init__(self, data_dir: str | Path):
         data_dir = Path(data_dir)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path = str(data_dir / "teaching.db")
+        self._db_path = str(self._resolve_db_path(data_dir))
         self._sql = sqlite3.connect(self._db_path, check_same_thread=False)
         self._sql.row_factory = sqlite3.Row
         self._sql.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
+
+    @classmethod
+    def _resolve_db_path(cls, data_dir: Path) -> Path:
+        """Resolve the active teaching DB path with legacy `kb/` compatibility."""
+        if not data_dir.exists():
+            data_dir.mkdir(parents=True, exist_ok=True)
+
+        direct_db = data_dir / "teaching.db"
+        legacy_dir = data_dir / "kb"
+        legacy_db = legacy_dir / "teaching.db"
+
+        # If caller already passed the legacy kb directory, keep using it.
+        if data_dir.name == "kb":
+            return direct_db
+
+        if direct_db.exists() and not legacy_db.exists():
+            return direct_db
+
+        if legacy_db.exists() and not direct_db.exists():
+            legacy_dir.mkdir(parents=True, exist_ok=True)
+            return legacy_db
+
+        if legacy_db.exists() and direct_db.exists():
+            direct_count = cls._get_chunk_count(direct_db)
+            legacy_count = cls._get_chunk_count(legacy_db)
+            if legacy_count > direct_count:
+                return legacy_db
+
+        return direct_db
+
+    @staticmethod
+    def _get_chunk_count(db_path: Path) -> int:
+        try:
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+            conn.close()
+            return int(row[0]) if row else 0
+        except Exception:
+            return 0
 
     # ------------------------------------------------------------------
     # Schema
@@ -50,7 +88,13 @@ class KnowledgeBase:
                 exam          TEXT,
                 language      TEXT,
                 text          TEXT,
-                metadata_json TEXT
+                metadata_json TEXT,
+                word_count    INTEGER DEFAULT 0,
+                estimated_time INTEGER DEFAULT 0,
+                subject_category TEXT DEFAULT 'general',
+                difficulty_score INTEGER DEFAULT 5,
+                question_types_json TEXT DEFAULT '[]',
+                source_quality TEXT DEFAULT 'ai_generated'
             );
 
             CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(content_type);
@@ -81,7 +125,33 @@ class KnowledgeBase:
                 VALUES ('delete', old.rowid, old.chunk_id, old.content_type, old.difficulty, old.exam, old.text);
             END;
         """)
+
+        # Migrate: add new columns to existing chunks tables
+        existing = {r[1] for r in self._sql.execute("PRAGMA table_info(chunks)").fetchall()}
+        for col, col_type, default in [
+            ("word_count", "INTEGER", "0"),
+            ("estimated_time", "INTEGER", "0"),
+            ("subject_category", "TEXT", "'general'"),
+            ("difficulty_score", "INTEGER", "5"),
+            ("question_types_json", "TEXT", "'[]'"),
+            ("source_quality", "TEXT", "'ai_generated'"),
+        ]:
+            if col not in existing:
+                self._sql.execute(f"ALTER TABLE chunks ADD COLUMN {col} {col_type} DEFAULT {default}")
+
+        self._sql.execute("CREATE INDEX IF NOT EXISTS idx_chunks_subject ON chunks(subject_category)")
+        self._sql.execute("CREATE INDEX IF NOT EXISTS idx_chunks_difficulty_score ON chunks(difficulty_score)")
+        self._repair_builtin_content_rows()
+
         self._sql.commit()
+
+    def _repair_builtin_content_rows(self) -> None:
+        self._sql.execute(
+            """UPDATE chunks
+               SET content_type = 'listening'
+               WHERE content_type = 'general'
+                 AND LOWER(REPLACE(source_file, '\\', '/')) LIKE '%/content/listening/%'"""
+        )
 
     # ------------------------------------------------------------------
     # Ingestion
@@ -98,8 +168,10 @@ class KnowledgeBase:
             self._sql.executemany(
                 """INSERT OR IGNORE INTO chunks
                    (chunk_id, source_file, content_type, difficulty, topic,
-                    exam, language, text, metadata_json)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    exam, language, text, metadata_json, word_count,
+                    estimated_time, subject_category, difficulty_score,
+                    question_types_json, source_quality)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
                     (
                         c.chunk_id,
@@ -111,6 +183,12 @@ class KnowledgeBase:
                         c.language,
                         c.text,
                         json.dumps(c.metadata),
+                        len(c.text.split()),
+                        self._estimated_time(c.content_type.value, c.text),
+                        self._subject_category(c),
+                        self._difficulty_score(c.difficulty),
+                        json.dumps(self._question_types(c.metadata)),
+                        self._source_quality(c),
                     )
                     for c in batch
                 ],
@@ -304,3 +382,58 @@ class KnowledgeBase:
         except ValueError:
             idx = 2  # default B1
         return CEFR_LEVELS[idx : min(len(CEFR_LEVELS), idx + 2)]
+
+    @staticmethod
+    def _difficulty_score(cefr: str) -> int:
+        return {
+            "A1": 2,
+            "A2": 3,
+            "B1": 4,
+            "B2": 5,
+            "C1": 7,
+            "C2": 9,
+        }.get(str(cefr or "").upper(), 5)
+
+    @staticmethod
+    def _estimated_time(content_type: str, text: str) -> int:
+        words = max(1, len(str(text or "").split()))
+        if content_type == "reading":
+            return max(3, round(words / 180))
+        if content_type == "listening":
+            return max(2, round(words / 160))
+        return max(1, round(words / 200))
+
+    @staticmethod
+    def _subject_category(chunk: Chunk) -> str:
+        meta = chunk.metadata or {}
+        for key in ("subject_category", "subject", "domain"):
+            value = str(meta.get(key, "")).strip()
+            if value:
+                return value
+        return str(chunk.topic or "general")
+
+    @staticmethod
+    def _question_types(metadata: dict) -> list[str]:
+        questions = metadata.get("questions") if isinstance(metadata, dict) else None
+        if isinstance(questions, str):
+            try:
+                questions = json.loads(questions)
+            except Exception:
+                questions = []
+        if not isinstance(questions, list):
+            return []
+        result = []
+        for item in questions:
+            if not isinstance(item, dict):
+                continue
+            qtype = str(item.get("type", "")).strip()
+            if qtype and qtype not in result:
+                result.append(qtype)
+        return result
+
+    @staticmethod
+    def _source_quality(chunk: Chunk) -> str:
+        meta = chunk.metadata or {}
+        if meta.get("ai_generated"):
+            return "ai_generated"
+        return "builtin"

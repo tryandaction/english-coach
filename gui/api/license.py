@@ -1,168 +1,241 @@
-"""License API — verify and activate cloud license keys."""
+"""License API for activating and verifying cloud licenses."""
 from __future__ import annotations
 
+import json
 import os
-import time
 from pathlib import Path
 
+import urllib.request
 import yaml
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from gui.deps import load_config, _CONFIG_PATH, _load_env, reset_components
 from gui.license import (
-    verify_key_format,
-    verify_license_with_days,
-    make_license_record,
-    get_machine_id,
-    xor_decrypt,
+    WORKER_CLIENT_TOKEN,
     WORKER_URL,
-    WORKER_TOKEN,
+    encrypt_local_payload,
+    get_activation_capability,
+    get_license_ai_config,
+    get_machine_id,
+    make_license_record,
+    read_license_record,
+    verify_key_format,
+    verify_license_record,
 )
-from gui.deps import load_config, _CONFIG_PATH
 
 router = APIRouter(prefix="/api/license", tags=["license"])
 
 
-def _license_file() -> Path:
-    cfg = load_config()
+_ENV_KEYS = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
+
+def _resolve_data_dir(cfg: dict | None = None) -> Path:
+    cfg = cfg or load_config()
     raw = cfg.get("data_dir", "data")
     p = Path(raw)
-    data_dir = p if p.is_absolute() else _CONFIG_PATH.parent / raw
-    return data_dir / "license.key"
+    return p if p.is_absolute() else _CONFIG_PATH.parent / raw
 
 
-def load_saved_license() -> tuple[str, str, int, int, str]:
-    """Returns (key, machine_id, activate_ts, days, sig) or ('','',0,0,'')."""
-    lf = _license_file()
-    if not lf.exists():
-        return "", "", 0, 0, ""
-    content = lf.read_text(encoding="utf-8").strip()
-    parts = content.split("|")
-    # New format with encrypted API key: key|machine_id|activate_ts|days|encrypted_api_key|sig (6 parts)
-    if len(parts) == 6:
-        try:
-            return parts[0], parts[1], int(parts[2]), int(parts[3]), parts[5]
-        except ValueError:
-            pass
-    # Old format: key|machine_id|activate_ts|days|sig (5 parts)
-    if len(parts) == 5:
-        try:
-            return parts[0], parts[1], int(parts[2]), int(parts[3]), parts[4]
-        except ValueError:
-            pass
-    # Legacy 4-part format: key|machine_id|activate_ts|sig
-    if len(parts) == 4:
-        try:
-            return parts[0], parts[1], int(parts[2]), 0, parts[3]
-        except ValueError:
-            pass
-    return "", "", 0, 0, ""
+def _license_file(cfg: dict | None = None) -> Path:
+    return _resolve_data_dir(cfg) / "license.key"
 
 
-def save_license(key: str, machine_id: str, activate_ts: int, days: int) -> None:
+def _storage_format(cfg: dict | None = None) -> str:
+    record = read_license_record(_license_file(cfg).parent)
+    return record.format if record else "missing"
+
+
+def _self_key_status(cfg: dict | None = None) -> dict:
+    cfg = cfg or load_config()
+    data_dir = _resolve_data_dir(cfg)
+    _load_env(data_dir)
+
+    configured_backend = str(cfg.get("backend", "") or "").strip().lower()
+    backend = ""
+    env_var = ""
+    if configured_backend:
+        env_var = _ENV_KEYS.get(configured_backend, "")
+        if env_var and os.environ.get(env_var, "").strip():
+            backend = configured_backend
+
+    if not backend:
+        for candidate, candidate_env in _ENV_KEYS.items():
+            if os.environ.get(candidate_env, "").strip():
+                backend = candidate
+                env_var = candidate_env
+                break
+
+    return {
+        "has_self_key": bool(backend),
+        "self_key_backend": backend,
+        "self_key_env_var": env_var,
+    }
+
+
+def _save_proxy_license(
+    key: str,
+    machine_id: str,
+    activate_ts: int,
+    days: int,
+    session_token: str,
+) -> None:
     lf = _license_file()
     lf.parent.mkdir(parents=True, exist_ok=True)
-    record = make_license_record(key, machine_id, activate_ts, days)
+    payload_hex = encrypt_local_payload(key, machine_id, session_token)
+    record = make_license_record(
+        key=key,
+        machine_id=machine_id,
+        activate_ts=activate_ts,
+        days=days,
+        payload_kind="proxy_token",
+        payload_hex=payload_hex,
+    )
     lf.write_text(record, encoding="utf-8")
 
 
-def save_license_with_key(key: str, machine_id: str, activate_ts: int, days: int, api_key: str) -> None:
-    """Save license with encrypted API key embedded."""
-    lf = _license_file()
-    lf.parent.mkdir(parents=True, exist_ok=True)
+def _post_worker(path: str, body: dict) -> dict:
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"{WORKER_URL.rstrip('/')}{path}",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Worker-Token": WORKER_CLIENT_TOKEN,
+            "User-Agent": "EnglishCoach/2.0",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
 
-    # Encrypt API key using same derivation as activation
-    import hashlib
-    norm = key.replace("-", "")
-    derived = hashlib.sha256(f"{norm}:{machine_id}:{WORKER_TOKEN}".encode()).hexdigest()
 
-    # XOR encrypt the API key
-    key_bytes = api_key.encode()
-    derived_bytes = bytes.fromhex(derived)
-    encrypted = bytes(key_bytes[i] ^ derived_bytes[i % len(derived_bytes)] for i in range(len(key_bytes)))
-    encrypted_hex = encrypted.hex()
-
-    # Format: key|machine_id|activate_ts|days|encrypted_api_key|sig
-    from gui.license import _make_hmac
-    sig = _make_hmac(key, machine_id, activate_ts)
-    record = f"{key}|{machine_id}|{activate_ts}|{days}|{encrypted_hex}|{sig}"
-    lf.write_text(record, encoding="utf-8")
+def _verify_remote(key: str, machine_id: str) -> dict:
+    if not WORKER_URL or not WORKER_CLIENT_TOKEN:
+        return {"reachable": False, "ok": False, "error": "激活服务未配置"}
+    try:
+        result = _post_worker("/verify", {"key": key, "machine_id": machine_id})
+    except Exception as exc:
+        return {"reachable": False, "ok": False, "error": f"无法连接激活服务器（{exc}）"}
+    return {"reachable": True, **result}
 
 
 class LicenseRequest(BaseModel):
     key: str
 
 
+def build_license_status(cfg: dict | None = None) -> dict:
+    cfg = cfg or load_config()
+    capability = get_activation_capability()
+    data_dir = _resolve_data_dir(cfg)
+    record = read_license_record(data_dir)
+    storage_format = record.format if record else "missing"
+    self_key = _self_key_status(cfg)
+
+    def _base_status(**kwargs):
+        active = bool(kwargs.get("active", False))
+        cloud_ai_ready = bool(kwargs.get("ai_ready", False))
+        ai_ready = cloud_ai_ready or self_key["has_self_key"]
+        ai_mode = "cloud" if active and cloud_ai_ready else ("self_key" if self_key["has_self_key"] else "none")
+        return {
+            "active": active,
+            "cloud_license_active": active,
+            "days_left": int(kwargs.get("days_left", 0) or 0),
+            "mode": kwargs.get("mode", "self_key"),
+            "ai_mode": ai_mode,
+            "ai_ready": ai_ready,
+            "cloud_ai_ready": cloud_ai_ready,
+            "has_self_key": self_key["has_self_key"],
+            "self_key_backend": self_key["self_key_backend"],
+            "activation_available": capability["available"],
+            "activation_reason": capability["reason"],
+            "needs_reactivation": bool(kwargs.get("needs_reactivation", False)),
+            "storage_format": storage_format,
+            "server_verified": kwargs.get("server_verified"),
+            "verification_warning": kwargs.get("verification_warning", ""),
+            "error": kwargs.get("error", ""),
+        }
+
+    if not record:
+        return _base_status()
+
+    local = verify_license_record(record)
+    if not local["valid"]:
+        return _base_status(
+            error=local["error"],
+            needs_reactivation=local.get("needs_reactivation", False),
+        )
+
+    remote = _verify_remote(record.key, record.machine_id) if capability["available"] else {"reachable": False}
+    if remote.get("reachable"):
+        if not remote.get("ok"):
+            return _base_status(
+                error=remote.get("error", "License 校验失败"),
+                server_verified=True,
+            )
+        days_left = int(remote.get("days_left", 0))
+        verification_warning = ""
+        server_verified = True
+    else:
+        days_left = int(local["days_left"])
+        verification_warning = remote.get("error", "")
+        server_verified = False
+
+    ai_cfg = get_license_ai_config(data_dir)
+    return _base_status(
+        active=True,
+        days_left=days_left,
+        mode="cloud",
+        ai_ready=bool(ai_cfg),
+        server_verified=server_verified,
+        verification_warning=verification_warning,
+    )
+
+
 @router.get("/status")
 def license_status():
-    key, machine_id, activate_ts, days, sig = load_saved_license()
-    if not key:
-        return {"active": False, "days_left": 0, "mode": "self_key"}
-    if days == 0:
-        # Legacy record without days — treat as expired
-        return {"active": False, "days_left": 0, "mode": "self_key", "error": "请重新激活以更新 License 格式"}
-    result = verify_license_with_days(key, machine_id, activate_ts, days, sig)
-    if result["valid"]:
-        return {"active": True, "days_left": result["days_left"], "mode": "cloud"}
-    return {"active": False, "days_left": 0, "mode": "self_key", "error": result["error"]}
+    return build_license_status()
 
 
 @router.post("/activate")
 def activate_license(req: LicenseRequest):
-    # 1. Validate key format locally (fast fail)
+    capability = get_activation_capability()
+    if not capability["available"]:
+        return {"ok": False, "error": capability["reason"]}
+
     fmt = verify_key_format(req.key)
     if not fmt["valid"]:
         return {"ok": False, "error": fmt["error"]}
 
     machine_id = get_machine_id()
+    norm = req.key.strip().upper().replace("-", "")
+    display_key = f"{norm[0:4]}-{norm[4:8]}-{norm[8:12]}-{norm[12:16]}"
 
-    # 2. Call Cloudflare Worker to activate
     try:
-        import urllib.request
-        import json as _json
-
-        # Normalize key to XXXX-XXXX-XXXX-XXXX format for display
-        norm = req.key.strip().upper().replace("-", "")
-        display_key = f"{norm[0:4]}-{norm[4:8]}-{norm[8:12]}-{norm[12:16]}"
-
-        payload = _json.dumps({"key": display_key, "machine_id": machine_id}).encode()
-        worker_req = urllib.request.Request(
-            f"{WORKER_URL}/activate",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "X-Worker-Token": WORKER_TOKEN,
-                "User-Agent": "EnglishCoach/1.0",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(worker_req, timeout=10) as resp:
-            result = _json.loads(resp.read())
-    except Exception as e:
-        return {"ok": False, "error": f"无法连接激活服务器，请检查网络（{e}）"}
+        result = _post_worker("/activate", {"key": display_key, "machine_id": machine_id})
+    except Exception as exc:
+        return {"ok": False, "error": f"无法连接激活服务器，请检查网络（{exc}）"}
 
     if not result.get("ok"):
         return {"ok": False, "error": result.get("error", "激活失败")}
 
-    # 3. Decrypt the cloud API key
+    session_token = str(result.get("session_token", "")).strip()
+    if not session_token:
+        return {"ok": False, "error": "激活服务器未返回有效会话令牌"}
+
     try:
-        import hashlib
-        derived = hashlib.sha256(
-            f"{norm}:{machine_id}:{WORKER_TOKEN}".encode()
-        ).hexdigest()
-        cloud_api_key = xor_decrypt(result["encrypted_key"], derived)
-    except Exception as e:
-        return {"ok": False, "error": f"解密 API Key 失败（{e}）"}
+        activate_ts = int(result["activate_ts"])
+        days = int(result["days"])
+    except Exception:
+        return {"ok": False, "error": "激活服务器返回了无效的有效期数据"}
 
-    # 4. Save license file with days and encrypted API key
-    activate_ts = result["activate_ts"]
-    days = result["days"]
-    save_license_with_key(display_key, machine_id, activate_ts, days, cloud_api_key)
+    _save_proxy_license(display_key, machine_id, activate_ts, days, session_token)
 
-    # 5. Set API key in environment for current session
-    os.environ["DEEPSEEK_API_KEY"] = cloud_api_key
-
-    # 6. Update config to use deepseek backend
     try:
         with open(_CONFIG_PATH, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
@@ -172,9 +245,7 @@ def activate_license(req: LicenseRequest):
     except Exception:
         pass
 
-    from gui.deps import reset_components
     reset_components()
-
     return {"ok": True, "days_left": days}
 
 
@@ -183,4 +254,5 @@ def deactivate_license():
     lf = _license_file()
     if lf.exists():
         lf.unlink()
+    reset_components()
     return {"ok": True}

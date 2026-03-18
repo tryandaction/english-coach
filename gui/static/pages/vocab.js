@@ -8,8 +8,18 @@ let _currentTab = 'study';
 let _currentBook = null;
 let _allWords = [];
 let _searchTimeout = null;
-let _autoTts = localStorage.getItem('autoTts') !== 'false';
+const AUTO_TTS_KEY = 'vocab_auto_tts';
+const LEGACY_AUTO_TTS_KEY = 'autoTts';
+const BUILTIN_SYNC_KEY = 'vocab_builtin_sync_v2';
+let _autoTts = (() => {
+  const v = localStorage.getItem(AUTO_TTS_KEY);
+  if (v !== null) return v !== 'false';
+  const legacy = localStorage.getItem(LEGACY_AUTO_TTS_KEY);
+  return legacy !== 'false';
+})();
 let _cardContainer = null;
+let _currentCard = null;
+let _builtinSyncPromise = null;
 
 const _vocabStore = {
   get: () => { try { return JSON.parse(localStorage.getItem('vocab_session')); } catch { return null; } },
@@ -17,8 +27,108 @@ const _vocabStore = {
   clear: () => { try { localStorage.removeItem('vocab_session'); } catch {} },
 };
 
+async function loadStudyOverview() {
+  let exam = 'general';
+  let deck = { total: 0, due_today: 0, mature: 0 };
+  let library = { total_words: 0, by_level: [], by_subject: [] };
+  let subjects = [];
+
+  try {
+    const progress = await api.get('/api/progress');
+    exam = (progress.target_exam || 'general').toLowerCase();
+  } catch {}
+
+  try { deck = await api.get('/api/vocab/deck-stats'); } catch {}
+  try { library = await api.get(`/api/vocab/stats?exam=${encodeURIComponent(exam)}`); } catch {}
+  try {
+    const subjectResp = await api.get(`/api/vocab/subjects?exam=${encodeURIComponent(exam)}`);
+    subjects = (subjectResp.subjects || []).slice(0, 6);
+  } catch {}
+
+  return { exam, deck, library, subjects };
+}
+
+function ensureBuiltinSync() {
+  if (localStorage.getItem(BUILTIN_SYNC_KEY) === 'done') return null;
+  if (_builtinSyncPromise) return _builtinSyncPromise;
+
+  _builtinSyncPromise = api.post('/api/vocab/ingest_builtin', {})
+    .then((result) => {
+      if (result?.ok) localStorage.setItem(BUILTIN_SYNC_KEY, 'done');
+      return result;
+    })
+    .catch(() => null)
+    .finally(() => {
+      _builtinSyncPromise = null;
+    });
+
+  return _builtinSyncPromise;
+}
+
+function renderStudyOverview(overview) {
+  const levelHtml = (overview.library.by_level || []).map(row => `
+    <div class="card" style="flex:1;min-width:84px;text-align:center;padding:12px">
+      <div style="font-size:20px;font-weight:700">${row.word_count || 0}</div>
+      <div style="font-size:11px;color:var(--text-dim)">Level ${row.level}</div>
+    </div>
+  `).join('');
+
+  const subjectHtml = (overview.subjects || []).length
+    ? overview.subjects.map(subject => `<span class="tag">${escHtml(subject.subject)} · ${subject.word_count}</span>`).join(' ')
+    : '<span style="font-size:12px;color:var(--text-dim)">No subject metadata yet</span>';
+
+  return `
+    <div class="card" style="margin-bottom:16px;padding:18px">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">CURRENT LIBRARY</div>
+          <div style="font-size:22px;font-weight:700">${overview.library.total_words || 0} <span style="font-size:14px;color:var(--text-dim)">${escHtml((overview.exam || 'general').toUpperCase())} built-in words</span></div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <span class="tag">Deck ${overview.deck.total || 0}</span>
+          <span class="tag">Due ${overview.deck.due_today || 0}</span>
+          <span class="tag">Mature ${overview.deck.mature || 0}</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">${levelHtml}</div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">${subjectHtml}</div>
+    </div>
+  `;
+}
+
 function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function setAutoTts(enabled) {
+  _autoTts = !!enabled;
+  localStorage.setItem(AUTO_TTS_KEY, String(_autoTts));
+  // Keep legacy key for backward compatibility.
+  localStorage.setItem(LEGACY_AUTO_TTS_KEY, String(_autoTts));
+}
+
+function autoTtsButtonHtml() {
+  return `<button class="btn ${_autoTts ? 'btn-primary' : 'btn-outline'}" id="btn-auto-tts" style="font-size:12px;padding:5px 12px">${_autoTts ? '🔊 Auto Read: ON' : '🔇 Auto Read: OFF'}</button>`;
+}
+
+function bindAutoTtsButton(root) {
+  const btn = root.querySelector('#btn-auto-tts');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    setAutoTts(!_autoTts);
+    btn.className = `btn ${_autoTts ? 'btn-primary' : 'btn-outline'}`;
+    btn.textContent = _autoTts ? '🔊 Auto Read: ON' : '🔇 Auto Read: OFF';
+    // Give immediate feedback when turning on.
+    if (_autoTts && !_revealed && _currentCard?.word) tts(_currentCard.word);
+  });
+}
+
+function maybeAutoReadCurrentWord(revealed) {
+  if (_autoTts && !revealed && _currentCard?.word) {
+    // Preload first, then play immediately
+    ttsPreload(_currentCard.word);
+    setTimeout(() => tts(_currentCard.word), 50);
+  }
 }
 
 // ── Entry point ───────────────────────────────────────────────────
@@ -27,7 +137,7 @@ export async function render(el) {
   _sid = null; _revealed = false; _currentBook = null;
   _currentTab = 'study';
   renderShell(el);
-  api.post('/api/vocab/ingest_builtin', {}).catch(() => {});
+  ensureBuiltinSync();
   await showTab(el, 'study');
 }
 
@@ -74,16 +184,19 @@ async function showTab(el, tab) {
 
 async function renderStudyTab(el, content) {
   content.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div></div>';
+  const syncPromise = ensureBuiltinSync();
+  const overview = await loadStudyOverview();
+  if (api.isAborted() || !el.isConnected) return;
 
-  // If user has a recently studied book, go straight into it
-  const lastBookId = localStorage.getItem('lastStudiedBookId');
-  if (lastBookId) {
-    try {
-      const books = await api.get('/api/wordbooks');
-      const book = books.find(b => b.book_id === lastBookId);
-      if (book) { await startBookSession(el, content, book); return; }
-    } catch {}
+  if (syncPromise) {
+    syncPromise.then(() => {
+      if (_currentTab === 'study' && el.isConnected) {
+        renderStudyTab(el, content);
+      }
+    });
   }
+
+  const overviewHtml = renderStudyOverview(overview);
 
   // Restore in-progress session (navigate-back)
   const saved = _vocabStore.get();
@@ -93,26 +206,17 @@ async function renderStudyTab(el, content) {
     _remaining = saved.remaining;
     _exam = saved.exam || 'general';
     _wordListLabel = saved.word_list_label || '';
-
-    const ttsToggle = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;color:var(--text-dim)">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="auto-tts-toggle" ${_autoTts ? 'checked' : ''} style="width:auto">
-          🔊 Auto-read word on flip
-        </label>
+    content.innerHTML = `
+      ${overviewHtml}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+        ${autoTtsButtonHtml()}
+        <span style="font-size:12px;color:var(--text-dim)">Auto pronounce current word</span>
       </div>`;
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = ttsToggle;
-    content.innerHTML = '';
-    content.appendChild(tempDiv);
     const cardDiv = document.createElement('div');
     _cardContainer = cardDiv;
     content.appendChild(cardDiv);
+    bindAutoTtsButton(content);
     renderCard(el, cardDiv, saved.card, false);
-    content.querySelector('#auto-tts-toggle')?.addEventListener('change', e => {
-      _autoTts = e.target.checked;
-      localStorage.setItem('autoTts', _autoTts);
-    });
     if (saved.card) { ttsPreload && ttsPreload(saved.card.word); }
     return;
   }
@@ -121,8 +225,9 @@ async function renderStudyTab(el, content) {
     const r = await api.post('/api/vocab/start', { max_cards: 20 });
     if (r.empty) {
       let stats = {};
-      try { stats = await api.get('/api/vocab/stats'); } catch {}
+      try { stats = await api.get('/api/vocab/deck-stats'); } catch {}
       content.innerHTML = `
+        ${overviewHtml}
         <div class="alert alert-success">🎉 No cards due today! Come back tomorrow.</div>
         ${stats.total === 0 ? `
         <div class="card" style="text-align:center;padding:32px;margin-top:16px">
@@ -156,30 +261,23 @@ async function renderStudyTab(el, content) {
     _vocabStore.set({ session_id: _sid, total: _total, remaining: _remaining,
                       exam: _exam, word_list_label: _wordListLabel, card: r.card });
 
-    const ttsToggle = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;color:var(--text-dim)">
-        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-          <input type="checkbox" id="auto-tts-toggle" ${_autoTts ? 'checked' : ''} style="width:auto">
-          🔊 Auto-read word on flip
-        </label>
-      </div>`;
+    // Preload TTS immediately when session starts
+    if (r.card?.word) {
+      ttsPreload && ttsPreload(r.card.word);
+    }
 
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = ttsToggle;
-    content.innerHTML = '';
-    content.appendChild(tempDiv);
+    content.innerHTML = `
+      ${overviewHtml}
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+        ${autoTtsButtonHtml()}
+        <span style="font-size:12px;color:var(--text-dim)">Auto pronounce current word</span>
+      </div>`;
 
     const cardDiv = document.createElement('div');
     _cardContainer = cardDiv;
     content.appendChild(cardDiv);
+    bindAutoTtsButton(content);
     renderCard(el, cardDiv, r.card, false);
-
-    content.querySelector('#auto-tts-toggle')?.addEventListener('change', e => {
-      _autoTts = e.target.checked;
-      localStorage.setItem('autoTts', _autoTts);
-    });
-
-    if (r.card) { ttsPreload && ttsPreload(r.card.word); }
   } catch (e) {
     if (e.message.includes('profile') || e.message.includes('Profile') || e.message.includes('No profile')) {
       content.innerHTML = `
@@ -197,6 +295,7 @@ async function renderStudyTab(el, content) {
 }
 
 function renderCard(el, content, card, revealed) {
+  _currentCard = card;
   _revealed = revealed;
   const done = _total - _remaining;
   const pct = Math.round((done / _total) * 100);
@@ -242,6 +341,7 @@ function renderCard(el, content, card, revealed) {
       <div id="tag-bar" style="display:flex;justify-content:center;gap:8px;margin-top:12px;flex-wrap:wrap"></div>
     </div>
   `;
+  maybeAutoReadCurrentWord(revealed);
 
   const fc = content.querySelector('#fc');
   fc.addEventListener('click', async (e) => {
@@ -271,8 +371,7 @@ function renderCard(el, content, card, revealed) {
         ${detail.derivatives ? `<div class="field"><span style="color:var(--text-dim)">Derivatives: </span>${escHtml(detail.derivatives)}</div>` : ''}
         ${sl ? `<div style="margin-top:12px;font-size:11px;color:var(--text-dim);text-align:right">${escHtml(sl)}</div>` : ''}
       `;
-      if (_autoTts && detail.word) tts(detail.word);
-      else if (detail.example) ttsPreload && ttsPreload(detail.example);
+      if (detail.example) ttsPreload && ttsPreload(detail.example);
       if (detail.word_id) renderTagBar(content.querySelector('#tag-bar'), detail.word_id);
     } catch {}
     content.querySelector('#rating-area').classList.remove('hidden');
@@ -375,86 +474,259 @@ function showComplete(el, content, stats) {
 
 const ICONS  = ['📖','📝','🧠','⭐','🔥','💡','🎯','🌟','📌','🏆','🌈','🔬','🎓','💬','🗂'];
 const COLORS = ['#4f8ef7','#7c5cfc','#3ecf8e','#f5c842','#f26b6b','#f97316','#06b6d4','#ec4899','#a855f7','#84cc16'];
+const EXAM_BOOK_ORDER = ['TOEFL', 'IELTS', 'GRE', 'CET', 'GENERAL'];
+const BOOK_GROUP_ORDER = ['精选词', '核心词', '全面词', '阅读高频', '听力高频', '写作词汇', '口语词汇', '学术桥接', '学术词', '学科词', '高频词', '冲刺词'];
+
+function bookChips(book) {
+  const chips = [];
+  chips.push(`<span class="tag">${book.is_builtin ? '内置' : '用户'}</span>`);
+  if (book.exam) chips.push(`<span class="tag">${escHtml(String(book.exam).toUpperCase())}</span>`);
+  if (book.series) chips.push(`<span class="tag">${escHtml(book.series)}</span>`);
+  if (book.book_group) chips.push(`<span class="tag">${escHtml(book.book_group)}</span>`);
+  if (book.skill_focus) chips.push(`<span class="tag">${escHtml(book.skill_focus)}</span>`);
+  if (book.stage) chips.push(`<span class="tag">${escHtml(book.stage)}</span>`);
+  if (book.level) chips.push(`<span class="tag">${escHtml(book.level)}</span>`);
+  return chips.join(' ');
+}
+
+function bookCard(book, opts = {}) {
+  const synced = !!book.book_id;
+  const due = book.due_today || 0;
+  const meta = bookChips(book);
+  const countLabel = synced ? (book.word_count || 0) : (book.word_count || 0);
+  const actionHtml = synced
+    ? `
+      <button class="btn btn-outline btn-book-open" style="font-size:12px;padding:4px 10px">浏览</button>
+      <button class="btn btn-primary btn-book-study" style="font-size:12px;padding:4px 10px">学习 ▶</button>`
+    : `<button class="btn btn-outline btn-book-sync" style="font-size:12px;padding:4px 10px">同步内置词书</button>`;
+  const manageHtml = book.is_builtin
+    ? `<span style="font-size:11px;color:var(--text-dim)">只读内置词书</span>`
+    : `
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-outline btn-book-edit" style="font-size:11px;padding:3px 8px">✏️</button>
+        <button class="btn btn-outline btn-book-delete" style="font-size:11px;padding:3px 8px;color:var(--red)">🗑</button>
+      </div>`;
+
+  return `
+    <div class="book-card card" data-book-id="${book.book_id || ''}" data-book-key="${book.book_key || ''}" style="padding:20px;position:relative">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:12px">
+        <div style="display:flex;align-items:flex-start;gap:10px;min-width:0">
+          <span style="font-size:28px">${book.icon || '📖'}</span>
+          <div style="min-width:0">
+            <div style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span>${escHtml(book.name || 'Untitled Book')}</span>
+              ${book.is_builtin && !synced ? '<span class="tag">未同步</span>' : ''}
+            </div>
+            ${book.description ? `<div style="font-size:12px;color:var(--text-dim);margin-top:4px">${escHtml(book.description)}</div>` : ''}
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${meta}</div>
+          </div>
+        </div>
+        ${manageHtml}
+      </div>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;gap:12px;font-size:13px;flex-wrap:wrap">
+          <span><strong>${countLabel}</strong> <span style="color:var(--text-dim)">words</span></span>
+          ${synced ? `<span><strong>${due}</strong> <span style="color:var(--text-dim)">due</span></span>` : ''}
+          ${book.source_label ? `<span style="color:var(--text-dim)">${escHtml(book.source_label)}</span>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${actionHtml}
+        </div>
+      </div>
+      <div style="position:absolute;bottom:0;left:0;right:0;height:3px;border-radius:0 0 var(--radius) var(--radius);background:${book.color || 'var(--accent)'}"></div>
+    </div>`;
+}
 
 async function renderBooksTab(el, content) {
   _currentBook = null;
-  content.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-      <span style="color:var(--text-dim);font-size:14px">Custom vocabulary collections with spaced repetition</span>
-      <button class="btn btn-primary" id="btn-create-book">+ New Book</button>
-    </div>
-    <div id="books-list"><div style="text-align:center;padding:40px"><div class="spinner"></div></div></div>
-  `;
-  content.querySelector('#btn-create-book').addEventListener('click', () => showBookModal(el, content, null));
-  await loadBookList(el, content);
-}
-
-async function loadBookList(el, content) {
-  const container = content.querySelector('#books-list');
-  if (!container) return;
+  content.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div></div>';
   try {
-    const books = await api.get('/api/wordbooks');
-    if (!books.length) {
-      container.innerHTML = `
-        <div class="card" style="text-align:center;padding:40px">
-          <div style="font-size:48px;margin-bottom:12px">📭</div>
-          <h3 style="margin-bottom:8px">No word books yet</h3>
-          <p style="color:var(--text-dim);margin-bottom:20px">Create custom collections — like Anki decks — with AI enrichment.</p>
-          <button class="btn btn-primary" id="btn-create-first">+ Create Word Book</button>
-        </div>`;
-      container.querySelector('#btn-create-first').addEventListener('click', () => showBookModal(el, content, null));
-      return;
+    const library = await api.get('/api/vocab/library');
+    let books = [];
+    if (library.setup?.configured) {
+      try { books = await api.get('/api/wordbooks'); } catch {}
     }
-    container.innerHTML = `<div class="book-grid">${books.map(b => bookCard(b)).join('')}</div>`;
-    container.querySelectorAll('.book-card').forEach(card => {
-      const book = books.find(b => b.book_id === card.dataset.bookId);
-      card.querySelector('.btn-book-open').addEventListener('click', () => showBookDetail(el, content, book));
-      card.querySelector('.btn-book-edit').addEventListener('click', e => { e.stopPropagation(); showBookModal(el, content, book); });
-      card.querySelector('.btn-book-delete').addEventListener('click', e => { e.stopPropagation(); confirmDeleteBook(el, content, book); });
-      card.querySelector('.btn-book-study').addEventListener('click', e => { e.stopPropagation(); startBookSession(el, content, book); });
-    });
-  } catch (e) {
-    if (e.message.includes('profile') || e.message.includes('No profile')) {
-      container.innerHTML = `<div class="card" style="text-align:center;padding:40px"><div style="font-size:40px;margin-bottom:12px">⚙️</div><h3>Setup Required</h3><button class="btn btn-primary" onclick="navigate('setup')">Go to Setup →</button></div>`;
-    } else {
-      container.innerHTML = `<div class="alert alert-error">${e.message} <button class="btn btn-outline" style="margin-left:8px" id="btn-retry-wb">Retry ↺</button></div>`;
-      container.querySelector('#btn-retry-wb')?.addEventListener('click', () => loadBookList(el, content));
-    }
-  }
-}
 
-function bookCard(b) {
-  const due = b.due_today || 0;
-  const dueBadge = due > 0
-    ? `<span style="background:var(--accent);color:#fff;border-radius:12px;padding:2px 8px;font-size:11px;font-weight:700">${due} due</span>`
-    : `<span style="color:var(--text-dim);font-size:11px">0 due</span>`;
-  return `
-    <div class="book-card card" data-book-id="${b.book_id}" style="padding:20px;position:relative">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px">
-        <div style="display:flex;align-items:center;gap:10px">
-          <span style="font-size:28px">${b.icon}</span>
-          <div>
-            <div style="font-weight:700;font-size:15px">${escHtml(b.name)}</div>
-            ${b.description ? `<div style="font-size:12px;color:var(--text-dim);margin-top:2px">${escHtml(b.description)}</div>` : ''}
+    const booksByKey = new Map(books.filter(b => b.book_key).map(b => [b.book_key, b]));
+    const builtins = (library.builtin_catalog?.books || []).map(b => ({ ...b, is_builtin: true, ...(booksByKey.get(b.book_key) || {}) }));
+    const users = books.filter(b => !b.is_builtin);
+    const recommended = (library.recommended_path || []).map(item => ({ ...(library.builtin_catalog?.books || []).find(b => b.book_key === item.book_key), ...(booksByKey.get(item.book_key) || {}), ...item, is_builtin: true }));
+    const summary = library.builtin_catalog?.stats || {};
+    const db = library.database || {};
+    const examOptions = ['all', ...new Set(builtins.map(book => String(book.exam || 'general').toUpperCase()))];
+    const skillOptions = ['all', ...new Set(builtins.map(book => String(book.skill_focus || '').trim()).filter(Boolean))];
+    const stageOptions = ['all', ...new Set(builtins.map(book => String(book.stage || '').trim()).filter(Boolean))];
+    const mergedBuiltinsById = new Map(builtins.filter(book => book.book_id).map(book => [book.book_id, book]));
+    const mergedBuiltinsByKey = new Map(builtins.filter(book => book.book_key).map(book => [book.book_key, book]));
+    const state = { view: 'recommended', scope: 'all', exam: 'all', skill: 'all', stage: 'all' };
+
+    const renderPage = () => {
+      const matchBuiltin = (book) => {
+        if (state.exam !== 'all' && String(book.exam || 'general').toUpperCase() !== state.exam) return false;
+        if (state.skill !== 'all' && String(book.skill_focus || '') !== state.skill) return false;
+        if (state.stage !== 'all' && String(book.stage || '') !== state.stage) return false;
+        return true;
+      };
+      const matchUser = (book) => {
+        if (state.exam !== 'all' && String(book.exam || 'general').toUpperCase() !== state.exam) return false;
+        return true;
+      };
+      const visibleBuiltins = state.scope === 'user' ? [] : builtins.filter(matchBuiltin);
+      const visibleUsers = state.scope === 'builtin' ? [] : users.filter(matchUser);
+      const filteredRecommended = recommended.filter(book => {
+        if (state.scope === 'user') return false;
+        return matchBuiltin(book);
+      });
+      const examSections = {};
+      visibleBuiltins.forEach(book => {
+        const examKey = (book.exam || 'general').toUpperCase();
+        const groupKey = book.book_group || '内置词书';
+        examSections[examKey] = examSections[examKey] || {};
+        examSections[examKey][groupKey] = examSections[examKey][groupKey] || [];
+        examSections[examKey][groupKey].push(book);
+      });
+      const orderedExamKeys = Object.keys(examSections).sort((a, b) => {
+        const ai = EXAM_BOOK_ORDER.indexOf(a);
+        const bi = EXAM_BOOK_ORDER.indexOf(b);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi) || a.localeCompare(b);
+      });
+      content.innerHTML = `
+        <div class="card" style="margin-bottom:16px;padding:18px">
+          <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start">
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--text-dim);letter-spacing:.04em;margin-bottom:6px">VOCAB LIBRARY</div>
+              <div style="font-size:22px;font-weight:700">推荐路径 + 全部词书</div>
+              <div style="font-size:13px;color:var(--text-dim);margin-top:6px">单词书按考试与用途拆分为精选、全面和单项突破系列。内置词书增量同步，用户自建词书和词条不会被删除。</div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-outline" id="btn-sync-builtins">同步内置词书</button>
+              ${library.setup?.configured ? '<button class="btn btn-primary" id="btn-create-book">+ 新建词书</button>' : '<button class="btn btn-primary" onclick="navigate(\'setup\')">去设置</button>'}
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:16px">
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${summary.unique_words || 0}</div><div style="font-size:12px;color:var(--text-dim)">可用唯一词数</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${summary.declared_entries || 0}</div><div style="font-size:12px;color:var(--text-dim)">原始词条行数</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${summary.incomplete_entries || 0}</div><div style="font-size:12px;color:var(--text-dim)">缺释义未导入</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${db.unique_words || 0}</div><div style="font-size:12px;color:var(--text-dim)">数据库唯一词数</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${builtins.length}</div><div style="font-size:12px;color:var(--text-dim)">专业内置词书</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${users.length}</div><div style="font-size:12px;color:var(--text-dim)">用户词书</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${summary.quality?.definition_zh?.pct || 0}%</div><div style="font-size:12px;color:var(--text-dim)">中释义覆盖</div></div>
+            <div class="card" style="padding:14px;text-align:center"><div style="font-size:24px;font-weight:700">${summary.quality?.example?.pct || 0}%</div><div style="font-size:12px;color:var(--text-dim)">例句覆盖</div></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+            <span class="tag">${library.setup?.has_api_key ? 'AI 可用' : 'AI 未配置'}</span>
+            <span class="tag">${library.setup?.offline_ready ? '离线词库可用' : '未发现内置词库'}</span>
+            <span class="tag">数据目录 ${escHtml(library.setup?.data_dir || '')}</span>
           </div>
         </div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-outline btn-book-edit" style="font-size:11px;padding:3px 8px">✏️</button>
-          <button class="btn btn-outline btn-book-delete" style="font-size:11px;padding:3px 8px;color:var(--red)">🗑</button>
+
+        ${!library.setup?.configured ? `
+          <div class="card" style="margin-bottom:16px;padding:22px">
+            <div style="font-size:18px;font-weight:700;margin-bottom:6px">先完成用户设置，才能创建个人词书和 SRS 记录</div>
+            <div style="font-size:13px;color:var(--text-dim);margin-bottom:14px">当前仍可看到内置词书规划和真实覆盖规模，但不会生成个人词书实例。</div>
+            <button class="btn btn-primary" onclick="navigate('setup')">前往 Setup</button>
+          </div>` : ''}
+
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn ${state.view === 'recommended' ? 'btn-primary' : 'btn-outline'}" id="btn-view-recommended">推荐学习路径</button>
+            <button class="btn ${state.view === 'all' ? 'btn-primary' : 'btn-outline'}" id="btn-view-all">全部词书</button>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn ${state.scope === 'all' ? 'btn-primary' : 'btn-outline'}" id="btn-scope-all">全部</button>
+            <button class="btn ${state.scope === 'builtin' ? 'btn-primary' : 'btn-outline'}" id="btn-scope-builtins">内置</button>
+            <button class="btn ${state.scope === 'user' ? 'btn-primary' : 'btn-outline'}" id="btn-scope-users">用户</button>
+            <select id="filter-exam" class="input" style="min-width:120px">
+              ${examOptions.map(exam => `<option value="${escHtml(exam)}" ${state.exam === exam ? 'selected' : ''}>${exam === 'all' ? '全部考试' : exam}</option>`).join('')}
+            </select>
+            <select id="filter-skill" class="input" style="min-width:120px">
+              ${skillOptions.map(skill => `<option value="${escHtml(skill)}" ${state.skill === skill ? 'selected' : ''}>${skill === 'all' ? '全部技能' : escHtml(skill)}</option>`).join('')}
+            </select>
+            <select id="filter-stage" class="input" style="min-width:120px">
+              ${stageOptions.map(stage => `<option value="${escHtml(stage)}" ${state.stage === stage ? 'selected' : ''}>${stage === 'all' ? '全部阶段' : escHtml(stage)}</option>`).join('')}
+            </select>
+          </div>
         </div>
-      </div>
-      <div style="display:flex;align-items:center;justify-content:space-between">
-        <div style="display:flex;gap:12px;font-size:13px">
-          <span><strong>${b.word_count || 0}</strong> <span style="color:var(--text-dim)">words</span></span>
-          ${dueBadge}
-        </div>
-        <div style="display:flex;gap:6px">
-          <button class="btn btn-outline btn-book-open" style="font-size:12px;padding:4px 10px">Browse</button>
-          <button class="btn btn-primary btn-book-study" style="font-size:12px;padding:4px 10px">Study ▶</button>
-        </div>
-      </div>
-      <div style="position:absolute;bottom:0;left:0;right:0;height:3px;border-radius:0 0 var(--radius) var(--radius);background:${b.color}"></div>
-    </div>`;
+
+        ${state.view === 'recommended' ? `
+          <div class="card" style="margin-bottom:16px;padding:16px">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px">推荐学习路径</div>
+            <div style="font-size:12px;color:var(--text-dim)">先学精选或核心，再学全面词书，最后按阅读、听力、写作单项突破。推荐顺序基于当前项目内真实可导入词量。</div>
+          </div>
+          <div class="book-grid">${filteredRecommended.map(book => bookCard(book)).join('') || '<div class="card" style="padding:32px;text-align:center;color:var(--text-dim)">当前筛选条件下没有可展示的推荐词书。</div>'}</div>
+        ` : `
+          ${orderedExamKeys.map(examKey => {
+            const groups = examSections[examKey] || {};
+            const orderedGroups = Object.keys(groups).sort((a, b) => {
+              const ai = BOOK_GROUP_ORDER.indexOf(a);
+              const bi = BOOK_GROUP_ORDER.indexOf(b);
+              return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi) || a.localeCompare(b);
+            });
+            const examCount = orderedGroups.reduce((sum, group) => sum + (groups[group] || []).length, 0);
+            return `
+            <div class="card" style="margin-bottom:16px;padding:16px">
+              <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+                <div style="font-size:16px;font-weight:700">${escHtml(examKey)}</div>
+                <span class="tag">${examCount} 本词书</span>
+              </div>
+              ${orderedGroups.map(group => `
+                <div style="margin-bottom:16px">
+                  <div style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text-dim)">${escHtml(group)}</div>
+                  <div class="book-grid">${groups[group].map(book => bookCard(book)).join('')}</div>
+                </div>`).join('')}
+            </div>`;
+          }).join('')}
+          ${visibleUsers.length ? `
+            <div style="margin-top:12px">
+              <div style="font-size:14px;font-weight:700;margin-bottom:10px">用户自建</div>
+              <div class="book-grid">${visibleUsers.map(book => bookCard(book)).join('')}</div>
+            </div>` : state.scope !== 'builtin' ? `
+            <div class="card" style="padding:28px;text-align:center">
+              <div style="font-size:36px;margin-bottom:10px">📭</div>
+              <div style="font-size:16px;font-weight:700;margin-bottom:6px">还没有用户词书</div>
+              <div style="font-size:12px;color:var(--text-dim);margin-bottom:14px">你可以手动建词书，或在 Add Word 页面导入 JSON / CSV / Markdown。</div>
+              ${library.setup?.configured ? '<button class="btn btn-primary" id="btn-create-first">+ 新建词书</button>' : ''}
+            </div>` : ''}
+        `}
+      `;
+
+      content.querySelector('#btn-sync-builtins')?.addEventListener('click', async () => {
+        const btn = content.querySelector('#btn-sync-builtins');
+        btn.disabled = true;
+        btn.textContent = '同步中...';
+        try { await api.post('/api/vocab/ingest_builtin', {}); } catch {}
+        await renderBooksTab(el, content);
+      });
+      content.querySelector('#btn-create-book')?.addEventListener('click', () => showBookModal(el, content, null));
+      content.querySelector('#btn-create-first')?.addEventListener('click', () => showBookModal(el, content, null));
+      content.querySelector('#btn-view-recommended')?.addEventListener('click', () => { state.view = 'recommended'; renderPage(); });
+      content.querySelector('#btn-view-all')?.addEventListener('click', () => { state.view = 'all'; renderPage(); });
+      content.querySelector('#btn-scope-all')?.addEventListener('click', () => { state.scope = 'all'; renderPage(); });
+      content.querySelector('#btn-scope-builtins')?.addEventListener('click', () => { state.scope = 'builtin'; renderPage(); });
+      content.querySelector('#btn-scope-users')?.addEventListener('click', () => { state.scope = 'user'; renderPage(); });
+      content.querySelector('#filter-exam')?.addEventListener('change', (e) => { state.exam = e.target.value; renderPage(); });
+      content.querySelector('#filter-skill')?.addEventListener('change', (e) => { state.skill = e.target.value; renderPage(); });
+      content.querySelector('#filter-stage')?.addEventListener('change', (e) => { state.stage = e.target.value; renderPage(); });
+      content.querySelectorAll('.book-card').forEach(card => {
+        const bookId = card.dataset.bookId;
+        const bookKey = card.dataset.bookKey;
+        const actual = mergedBuiltinsById.get(bookId) || mergedBuiltinsByKey.get(bookKey) || books.find(b => b.book_id === bookId) || booksByKey.get(bookKey);
+        card.querySelector('.btn-book-open')?.addEventListener('click', () => actual && showBookDetail(el, content, actual));
+        card.querySelector('.btn-book-study')?.addEventListener('click', () => actual && startBookSession(el, content, actual));
+        card.querySelector('.btn-book-edit')?.addEventListener('click', e => { e.stopPropagation(); actual && showBookModal(el, content, actual); });
+        card.querySelector('.btn-book-delete')?.addEventListener('click', e => { e.stopPropagation(); actual && confirmDeleteBook(el, content, actual); });
+        card.querySelector('.btn-book-sync')?.addEventListener('click', async () => {
+          await api.post('/api/vocab/ingest_builtin', {});
+          await renderBooksTab(el, content);
+        });
+      });
+    };
+
+    renderPage();
+  } catch (e) {
+    content.innerHTML = `<div class="alert alert-error">${e.message} <button class="btn btn-outline" id="btn-retry-wb" style="margin-left:8px">Retry ↺</button></div>`;
+    content.querySelector('#btn-retry-wb')?.addEventListener('click', () => renderBooksTab(el, content));
+  }
 }
 
 // ── Book Modal (create/edit) ───────────────────────────────────────
@@ -560,6 +832,7 @@ function confirmDeleteBook(el, content, book) {
 
 async function showBookDetail(el, content, book) {
   _currentBook = book;
+  const readOnly = !!book.is_builtin;
   content.innerHTML = `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
       <button class="btn btn-outline" id="btn-back" style="font-size:12px;padding:4px 10px">← Books</button>
@@ -567,10 +840,12 @@ async function showBookDetail(el, content, book) {
       <h2 style="margin:0">${escHtml(book.name)}</h2>
     </div>
     ${book.description ? `<p style="color:var(--text-dim);margin-bottom:12px">${escHtml(book.description)}</p>` : '<div style="margin-bottom:12px"></div>'}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${bookChips(book)}${book.source_label ? `<span class="tag">${escHtml(book.source_label)}</span>` : ''}</div>
+    ${readOnly ? `<div class="card" style="margin-bottom:14px;padding:14px;font-size:12px;color:var(--text-dim)">这是内置只读词书。你可以浏览和学习，但不能直接在这里增删词条。</div>` : ''}
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
       <button class="btn btn-primary" id="btn-study-book">▶ Study Now</button>
-      <button class="btn btn-outline" id="btn-add-word-book">+ Add Word</button>
-      <button class="btn btn-outline" id="btn-edit-book" style="margin-left:auto">✏️ Edit</button>
+      ${readOnly ? '' : '<button class="btn btn-outline" id="btn-add-word-book">+ Add Word</button>'}
+      ${readOnly ? '' : '<button class="btn btn-outline" id="btn-edit-book" style="margin-left:auto">✏️ Edit</button>'}
     </div>
     <div id="book-stats-row" style="display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap"></div>
     <input id="word-filter" type="text" placeholder="Filter words…" style="width:100%;max-width:320px;margin-bottom:12px">
@@ -579,8 +854,8 @@ async function showBookDetail(el, content, book) {
   `;
   content.querySelector('#btn-back').addEventListener('click', () => renderBooksTab(el, content));
   content.querySelector('#btn-study-book').addEventListener('click', () => startBookSession(el, content, book));
-  content.querySelector('#btn-add-word-book').addEventListener('click', () => showAddWordPanel(content, book, el));
-  content.querySelector('#btn-edit-book').addEventListener('click', () => showBookModal(el, content, book));
+  content.querySelector('#btn-add-word-book')?.addEventListener('click', () => showAddWordPanel(content, book, el));
+  content.querySelector('#btn-edit-book')?.addEventListener('click', () => showBookModal(el, content, book));
   let filterTimer = null;
   content.querySelector('#word-filter').addEventListener('input', e => {
     clearTimeout(filterTimer);
@@ -598,6 +873,10 @@ async function showBookDetail(el, content, book) {
       <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
         <div style="font-size:22px;font-weight:700">${data.book.due_today || 0}</div>
         <div style="font-size:11px;color:var(--text-dim)">Due today</div>
+      </div>
+      <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
+        <div style="font-size:22px;font-weight:700">${data.book.is_builtin ? 'Built-in' : 'Custom'}</div>
+        <div style="font-size:11px;color:var(--text-dim)">Book type</div>
       </div>`;
     renderWordList(content, book, '', data.words);
   } catch (e) {
@@ -623,20 +902,18 @@ function renderWordList(content, book, filter, words) {
   if (!list.length) {
     container.innerHTML = filter
       ? `<div style="color:var(--text-dim);padding:20px 0">No words match "${escHtml(filter)}"</div>`
-      : `<div class="card" style="text-align:center;padding:32px"><div style="font-size:36px;margin-bottom:10px">📭</div><p style="color:var(--text-dim)">No words yet. Click "+ Add Word" to get started.</p></div>`;
+      : `<div class="card" style="text-align:center;padding:32px"><div style="font-size:36px;margin-bottom:10px">📭</div><p style="color:var(--text-dim)">${book.is_builtin ? '当前内置词书还没有同步到个人数据库，先返回词书页执行同步。' : 'No words yet. Click "+ Add Word" to get started.'}</p></div>`;
     return;
   }
 
   let _selected = new Set();
-  let _bulkMode = false;
+  let _bulkMode = !book.is_builtin && false;
 
   const render = () => {
     container.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div style="font-size:12px;color:var(--text-dim)">${list.length} word${list.length !== 1 ? 's' : ''}</div>
-        <button id="btn-bulk-toggle" class="btn btn-outline" style="font-size:12px;padding:4px 10px">
-          ${_bulkMode ? '✕ Cancel' : '☑ Manage'}
-        </button>
+        ${book.is_builtin ? '<span style="font-size:12px;color:var(--text-dim)">内置词书为只读</span>' : `<button id="btn-bulk-toggle" class="btn btn-outline" style="font-size:12px;padding:4px 10px">${_bulkMode ? '✕ Cancel' : '☑ Manage'}</button>`}
       </div>
       ${_bulkMode ? `
       <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
@@ -925,12 +1202,16 @@ async function startBookSession(el, content, book) {
     _exam = 'general';
 
     content.innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
-        <button class="btn btn-outline" id="btn-back-session" style="font-size:12px;padding:4px 10px">← ${escHtml(book.name)}</button>
-        <span style="font-size:13px;color:var(--text-dim)">${r.total} cards</span>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-outline" id="btn-back-session" style="font-size:12px;padding:4px 10px">← ${escHtml(book.name)}</button>
+          <span style="font-size:13px;color:var(--text-dim)">${r.total} cards</span>
+        </div>
+        ${autoTtsButtonHtml()}
       </div>
       <div id="book-session-body"></div>`;
     content.querySelector('#btn-back-session').addEventListener('click', () => showBookDetail(el, content, book));
+    bindAutoTtsButton(content);
     const sessionBody = content.querySelector('#book-session-body');
     renderBookCard(el, content, sessionBody, r.card, false, book);
     if (r.card) { ttsPreload && ttsPreload(r.card.word); }
@@ -941,6 +1222,7 @@ async function startBookSession(el, content, book) {
 }
 
 function renderBookCard(el, content, sessionBody, card, revealed, book) {
+  _currentCard = card;
   _revealed = revealed;
   const done = _total - _remaining;
   const pct = Math.round((done / _total) * 100);
@@ -981,6 +1263,7 @@ function renderBookCard(el, content, sessionBody, card, revealed, book) {
       </div>
       <div id="btag-bar" style="display:flex;justify-content:center;gap:8px;margin-top:12px;flex-wrap:wrap"></div>
     </div>`;
+  maybeAutoReadCurrentWord(revealed);
 
   const fc = sessionBody.querySelector('#bfc');
   fc.addEventListener('click', async (e) => {
@@ -1005,7 +1288,6 @@ function renderBookCard(el, content, sessionBody, card, revealed, book) {
         ${detail.antonyms ? `<div class="field"><span style="color:var(--text-dim)">Antonyms: </span>${escHtml(detail.antonyms)}</div>` : ''}
         ${detail.collocations ? `<div class="field"><span style="color:var(--text-dim)">Collocations: </span>${escHtml(detail.collocations)}</div>` : ''}
         ${detail.derivatives ? `<div class="field"><span style="color:var(--text-dim)">Derivatives: </span>${escHtml(detail.derivatives)}</div>` : ''}`;
-      if (_autoTts && detail.word) tts(detail.word);
       if (detail.word_id) renderTagBar(sessionBody.querySelector('#btag-bar'), detail.word_id);
     } catch {}
     sessionBody.querySelector('#brating-area').classList.remove('hidden');
@@ -1059,6 +1341,7 @@ async function rateBookCard(el, content, sessionBody, quality, book) {
 async function renderAddTab(el, content) {
   let books = [];
   try { books = await api.get('/api/wordbooks'); } catch {}
+  books = books.filter(b => !b.is_builtin);
   const savedId = localStorage.getItem('defaultAddBookId') || '';
   const validDefault = books.find(b => b.book_id === savedId) ? savedId : (books.length ? books[0].book_id : '');
   let selectedBookId = validDefault;
@@ -1098,12 +1381,51 @@ async function renderAddTab(el, content) {
 
   content.innerHTML = `
     <div style="max-width:640px">
+      <div class="card" style="margin-bottom:18px;padding:16px">
+        <div style="font-size:15px;font-weight:700;margin-bottom:6px">离线也能用的词汇入口</div>
+        <div style="font-size:12px;color:var(--text-dim)">没有 API key 时仍可手动录词、导入词书、浏览内置词书和做 SRS 复习。AI Fill 只是可选加速，不是必需条件。</div>
+      </div>
       <div style="margin-bottom:24px">
         <div style="font-size:12px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px">Add to Word Book</div>
         <div id="book-selector" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px">
           ${buildBookSelector()}
         </div>
         <div id="book-sel-hint" style="font-size:12px;color:var(--text-dim);margin-top:8px"></div>
+      </div>
+
+      <div class="card" style="padding:18px;margin-bottom:20px">
+        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;margin-bottom:10px">
+          <div>
+            <div style="font-size:15px;font-weight:700;margin-bottom:4px">导入词书</div>
+            <div style="font-size:12px;color:var(--text-dim)">支持 <code>JSON / CSV / Markdown</code>。导入前会校验、统计重复词，并保护已有用户词条。</div>
+          </div>
+          <div style="font-size:12px;color:var(--text-dim)">规则：同词合并，用户词优先保留</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px">
+          <div class="form-group"><label>Format</label>
+            <select id="import-format">
+              <option value="auto">Auto detect</option>
+              <option value="json">JSON</option>
+              <option value="csv">CSV</option>
+              <option value="markdown">Markdown</option>
+            </select>
+          </div>
+          <div class="form-group"><label>Target Book</label>
+            <select id="import-target">
+              <option value="__new__">Create new imported book</option>
+              ${books.map(b => `<option value="${b.book_id}">${escHtml(b.name)}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="form-group" id="import-name-wrap"><label>New Book Name</label><input id="import-book-name" type="text" placeholder="e.g. My IELTS Writing Vocab"></div>
+        <div class="form-group"><label>Payload</label>
+          <textarea id="import-payload" rows="10" placeholder='{"book":{"name":"My Book","exam":"ielts","topic":"academic"},"words":[{"word":"abandon","definition_en":"to leave behind"}]}' style="width:100%"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <button class="btn btn-outline" id="btn-import-validate">Validate</button>
+          <button class="btn btn-primary" id="btn-import-run">Import</button>
+        </div>
+        <div id="import-result" style="margin-top:12px"></div>
       </div>
 
       <div style="padding:0">
@@ -1166,9 +1488,67 @@ async function renderAddTab(el, content) {
   const wordInput = content.querySelector('#add-word-input');
   const fieldsDiv = content.querySelector('#add-fields');
   const statusDiv = content.querySelector('#add-ai-status');
+  const importTarget = content.querySelector('#import-target');
+  const importNameWrap = content.querySelector('#import-name-wrap');
+  const importResult = content.querySelector('#import-result');
+
+  const updateImportTarget = () => {
+    importNameWrap.style.display = importTarget.value === '__new__' ? '' : 'none';
+  };
+  importTarget.addEventListener('change', updateImportTarget);
+  updateImportTarget();
 
   wordInput.addEventListener('input', () => {
     if (wordInput.value.trim()) fieldsDiv.style.display = '';
+  });
+
+  content.querySelector('#btn-import-validate').addEventListener('click', async () => {
+    const payload = content.querySelector('#import-payload').value.trim();
+    if (!payload) { importResult.innerHTML = '<div class="alert alert-error">Import payload is required</div>'; return; }
+    importResult.innerHTML = '<div style="font-size:12px;color:var(--text-dim)">Validating…</div>';
+    try {
+      const result = await api.post('/api/wordbooks/import/validate', {
+        payload,
+        format: content.querySelector('#import-format').value,
+      });
+      importResult.innerHTML = `
+        <div class="card" style="padding:14px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <span class="tag">Format ${escHtml(result.format)}</span>
+            <span class="tag">Valid ${result.stats.valid_words}</span>
+            <span class="tag">Unique ${result.stats.unique_words}</span>
+            <span class="tag">Existing ${result.stats.existing_words}</span>
+          </div>
+          ${result.errors?.length ? `<div class="alert alert-error" style="margin-bottom:8px">${result.errors.join('<br>')}</div>` : ''}
+          ${result.warnings?.length ? `<div class="alert alert-warn" style="margin-bottom:8px">${result.warnings.join('<br>')}</div>` : ''}
+          <div style="font-size:12px;color:var(--text-dim)">Merge rules: ${result.merge_rules.join(' / ')}</div>
+        </div>`;
+    } catch (e) {
+      importResult.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    }
+  });
+
+  content.querySelector('#btn-import-run').addEventListener('click', async () => {
+    const payload = content.querySelector('#import-payload').value.trim();
+    if (!payload) { importResult.innerHTML = '<div class="alert alert-error">Import payload is required</div>'; return; }
+    const btn = content.querySelector('#btn-import-run');
+    btn.disabled = true;
+    importResult.innerHTML = '<div style="font-size:12px;color:var(--text-dim)">Importing…</div>';
+    try {
+      const req = {
+        payload,
+        format: content.querySelector('#import-format').value,
+        book_id: importTarget.value === '__new__' ? null : importTarget.value,
+        book_name: content.querySelector('#import-book-name').value.trim(),
+      };
+      const result = await api.post('/api/wordbooks/import', req);
+      localStorage.setItem('defaultAddBookId', result.book.book_id);
+      importResult.innerHTML = `<div class="alert alert-success">✓ Imported ${result.stats.valid_words} words into ${escHtml(result.book.name)}</div>`;
+      setTimeout(() => renderAddTab(el, content), 600);
+    } catch (e) {
+      importResult.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    }
+    btn.disabled = false;
   });
 
   content.querySelector('#btn-ai-fill').addEventListener('click', async () => {
@@ -1229,4 +1609,3 @@ async function renderAddTab(el, content) {
 
   wordInput.focus();
 }
-

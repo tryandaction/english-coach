@@ -81,11 +81,15 @@ async function startChat(el) {
         <button class="btn btn-primary" style="margin-top:12px;display:block" onclick="navigate('setup')">Go to Setup →</button>
       </div>`;
     } else if (noKey) {
+      let licStatus = {};
+      try { licStatus = await api.get('/api/license/status'); } catch {}
       body.innerHTML = `<div class="alert alert-warn">
-        Chat requires an API key or an active cloud license.
+        ${licStatus.activation_available
+          ? 'Chat requires an API key or an active cloud license.'
+          : 'Chat requires an API key. 当前构建未配置激活服务。'}
         <div style="display:flex;gap:10px;margin-top:12px">
           <button class="btn btn-primary" onclick="navigate('setup')">Configure API Key</button>
-          <button class="btn btn-outline" onclick="navigate('license')">Activate License</button>
+          ${licStatus.activation_available ? '<button class="btn btn-outline" onclick="navigate(\'license\')">Activate License</button>' : ''}
         </div>
       </div>`;
     } else {
@@ -386,5 +390,4 @@ function _appendMsg(msgs, text, role) {
 function escHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-
 

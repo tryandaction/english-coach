@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import tempfile
 import threading
@@ -18,6 +19,640 @@ from pydantic import BaseModel
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/reading", tags=["reading"])
+
+
+def _row_value(row, key: str, default=None):
+    if row is None:
+        return default
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
+def _parse_questions(value) -> list[dict]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+@dataclass
+class PassageRecord:
+    chunk_id: str
+    chunk_ids: list[str]
+    source_file: str
+    passage_text: str
+    difficulty: str
+    topic: str
+    subject: str
+    exam: str
+    metadata: dict
+    questions: list[dict]
+    question_types: list[str]
+    word_count: int
+    estimated_time: int
+    difficulty_score: int
+    source_quality: str
+    ai_generated: bool = False
+
+
+def _json_object(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _json_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _preferred_value(values: list, default: str = "", skip_general: bool = False) -> str:
+    normalized = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if skip_general:
+        for value in normalized:
+            if value.lower() != "general":
+                return value
+    return normalized[0] if normalized else default
+
+
+def _passage_group_key(row) -> str:
+    source_file = str(_row_value(row, "source_file", "") or "").strip()
+    if source_file and source_file != "ai_warehouse":
+        return f"source:{source_file}"
+    chunk_id = str(_row_value(row, "chunk_id", "") or "").strip()
+    return f"chunk:{chunk_id or source_file or 'unknown'}"
+
+
+def _fetch_passage_rows(kb, row) -> list:
+    group_key = _passage_group_key(row)
+    if group_key.startswith("source:"):
+        source_file = group_key.split(":", 1)[1]
+        rows = kb._sql.execute(
+            """SELECT rowid, *
+               FROM chunks
+               WHERE content_type = 'reading' AND source_file = ?
+               ORDER BY rowid ASC""",
+            (source_file,),
+        ).fetchall()
+        if rows:
+            return rows
+
+    chunk_id = str(_row_value(row, "chunk_id", "") or "").strip()
+    if chunk_id:
+        db_row = kb._sql.execute(
+            "SELECT rowid, * FROM chunks WHERE chunk_id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if db_row is not None:
+            return [db_row]
+    return [row]
+
+
+def _merge_questions(rows: list) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        metadata = _json_object(_row_value(row, "metadata_json", "{}") or "{}")
+        for question in _parse_questions(metadata.get("questions")):
+            if not isinstance(question, dict):
+                continue
+            key = str(
+                question.get("id")
+                or question.get("question")
+                or json.dumps(question, sort_keys=True, ensure_ascii=True)
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(question)
+    return merged
+
+
+def _build_passage_record(kb, row) -> Optional[PassageRecord]:
+    rows = _fetch_passage_rows(kb, row)
+    chunk_ids = [str(_row_value(item, "chunk_id", "") or "").strip() for item in rows if _row_value(item, "chunk_id", "")]
+    paragraphs: list[str] = []
+    metadata: dict = {}
+    question_types: list[str] = []
+    source_quality = "builtin"
+    ai_generated = False
+
+    for item in rows:
+        text = str(_row_value(item, "text", "") or "").strip()
+        if text and (not paragraphs or paragraphs[-1] != text):
+            paragraphs.append(text)
+        metadata.update(_json_object(_row_value(item, "metadata_json", "{}") or "{}"))
+        for qtype in _json_list(_row_value(item, "question_types_json", "[]") or "[]"):
+            qtype = str(qtype or "").strip()
+            if qtype and qtype not in question_types:
+                question_types.append(qtype)
+        item_quality = str(_row_value(item, "source_quality", "") or "").strip()
+        if item_quality:
+            source_quality = item_quality
+        if item_quality == "ai_generated" or _json_object(_row_value(item, "metadata_json", "{}") or "{}").get("ai_generated"):
+            ai_generated = True
+
+    passage_text = "\n\n".join(paragraphs).strip()
+    if not passage_text:
+        return None
+
+    questions = _merge_questions(rows)
+    if questions:
+        metadata["questions"] = questions
+        question_types = _actual_question_types(questions)
+
+    word_count = len(passage_text.split())
+    estimated_candidates = [_safe_int(_row_value(item, "estimated_time", 0), 0) for item in rows]
+    difficulty_candidates = [_safe_int(_row_value(item, "difficulty_score", 0), 0) for item in rows]
+    topic = _preferred_value([_row_value(item, "topic", "") for item in rows], default="")
+    subject = _preferred_value(
+        [_row_value(item, "subject_category", "") for item in rows],
+        default=topic or "general",
+        skip_general=True,
+    )
+
+    return PassageRecord(
+        chunk_id=chunk_ids[0] if chunk_ids else str(_row_value(row, "chunk_id", "") or ""),
+        chunk_ids=chunk_ids,
+        source_file=str(_row_value(rows[0], "source_file", "") or ""),
+        passage_text=passage_text,
+        difficulty=_preferred_value([_row_value(item, "difficulty", "") for item in rows], default="B2"),
+        topic=topic,
+        subject=subject,
+        exam=_preferred_value([_row_value(item, "exam", "") for item in rows], default="general"),
+        metadata=metadata,
+        questions=questions,
+        question_types=question_types,
+        word_count=word_count,
+        estimated_time=max(max(estimated_candidates or [0]), max(3, round(word_count / 180))),
+        difficulty_score=max(difficulty_candidates or [0]),
+        source_quality=source_quality,
+        ai_generated=ai_generated,
+    )
+
+
+def _seen_passage_keys(kb, seen_chunk_ids: Optional[list[str]]) -> set[str]:
+    if not seen_chunk_ids:
+        return set()
+
+    ids = [str(chunk_id).strip() for chunk_id in seen_chunk_ids if str(chunk_id).strip()]
+    if not ids:
+        return set()
+
+    placeholders = ",".join("?" * len(ids))
+    rows = kb._sql.execute(
+        f"""SELECT chunk_id, source_file
+            FROM chunks
+            WHERE content_type = 'reading' AND chunk_id IN ({placeholders})""",
+        ids,
+    ).fetchall()
+
+    keys = {_passage_group_key(row) for row in rows}
+    found = {str(_row_value(row, "chunk_id", "") or "").strip() for row in rows}
+    for chunk_id in ids:
+        if chunk_id not in found:
+            keys.add(f"chunk:{chunk_id}")
+    return keys
+
+
+def _coalesce_passages(kb, rows: list, seen_chunk_ids: Optional[list[str]] = None, limit: Optional[int] = None) -> list[PassageRecord]:
+    passages: list[PassageRecord] = []
+    used: set[str] = set()
+    seen_keys = _seen_passage_keys(kb, seen_chunk_ids)
+
+    for row in rows:
+        group_key = _passage_group_key(row)
+        if group_key in used or group_key in seen_keys:
+            continue
+        passage = _build_passage_record(kb, row)
+        if passage is None:
+            continue
+        passages.append(passage)
+        used.add(group_key)
+        if limit and len(passages) >= limit:
+            break
+    return passages
+
+
+def _cache_passage_questions(kb, passage: PassageRecord, questions: list[dict]) -> None:
+    if not passage.chunk_id or not questions:
+        return
+    metadata = dict(passage.metadata or {})
+    metadata["questions"] = questions
+    question_types = _actual_question_types(questions)
+    kb._sql.execute(
+        "UPDATE chunks SET metadata_json = ?, question_types_json = ? WHERE chunk_id = ?",
+        (
+            json.dumps(metadata, ensure_ascii=False),
+            json.dumps(question_types, ensure_ascii=True),
+            passage.chunk_id,
+        ),
+    )
+    kb._sql.commit()
+    passage.metadata = metadata
+    passage.questions = questions
+    passage.question_types = question_types
+
+
+def _mark_passage_seen(user_model, user_id: str, passage: PassageRecord) -> None:
+    seen_ids = passage.chunk_ids or ([passage.chunk_id] if passage.chunk_id else [])
+    if seen_ids:
+        user_model.mark_seen(user_id, seen_ids)
+
+
+def _load_generation_passage_text(kb, supplied_passage: Optional[str], exam: str, cefr: str, not_found_message: str) -> str:
+    if supplied_passage:
+        return supplied_passage
+    rows = kb.get_by_type(
+        content_type="reading",
+        difficulty=cefr,
+        exam=exam,
+        limit=18,
+        random_order=True,
+    )
+    passages = _coalesce_passages(kb, rows, limit=4)
+    if not passages:
+        raise HTTPException(404, not_found_message)
+    return max(passages, key=lambda item: (item.word_count, len(item.questions))).passage_text
+
+
+READING_FILTER_OPTIONS = {
+    "toefl": [
+        ("factual", "Factual Information"),
+        ("inference", "Inference"),
+        ("vocabulary", "Vocabulary"),
+        ("negative_factual", "Negative Factual"),
+        ("rhetorical_purpose", "Rhetorical Purpose"),
+        ("reference", "Reference"),
+        ("sentence_simplification", "Sentence Simplification"),
+        ("insert_text", "Insert Text"),
+        ("prose_summary", "Prose Summary"),
+        ("fill_table", "Fill in a Table"),
+    ],
+    "ielts": [
+        ("tfng", "True / False / Not Given"),
+        ("matching_headings", "Matching Headings"),
+        ("summary_completion", "Summary Completion"),
+        ("matching_information", "Matching Information"),
+        ("short_answer", "Short Answer"),
+        ("diagram_label", "Diagram Label"),
+    ],
+}
+
+
+_PASSAGE_MIN_WORDS = {
+    "toefl": 650,
+    "ielts": 800,
+    "gre": 350,
+    "cet": 240,
+    "general": 180,
+}
+
+
+def _min_passage_words(exam: str) -> int:
+    return _PASSAGE_MIN_WORDS.get(str(exam or "general").lower(), 180)
+
+
+def _needs_ai_passage_upgrade(exam: str, word_count: int) -> bool:
+    return word_count > 0 and word_count < _min_passage_words(exam)
+
+
+def _cefr_from_difficulty(score: Optional[int], default: str) -> str:
+    if score is None:
+        return default
+    if score <= 3:
+        return "B1"
+    if score <= 5:
+        return "B2"
+    if score <= 7:
+        return "C1"
+    return "C2"
+
+
+def _split_sentences(text: str) -> list[str]:
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(text or "").replace("\n", " ")) if s.strip()]
+    return [s for s in sentences if len(s.split()) >= 4] or ([str(text or "").strip()] if text else [])
+
+
+def _short_answer(text: str, max_words: int = 10) -> str:
+    words = [w for w in str(text or "").replace("\n", " ").split() if w]
+    return " ".join(words[:max_words]).strip(" ,;:.") or "Not available"
+
+
+def _pick_keyword(text: str, offset: int = 0) -> str:
+    stopwords = {
+        "about", "after", "before", "because", "between", "during", "their", "there",
+        "these", "those", "which", "while", "where", "being", "under", "through",
+        "study", "could", "would", "should", "other", "people", "often", "using",
+    }
+    words = []
+    seen = set()
+    for token in re.findall(r"[A-Za-z][A-Za-z-]{4,}", str(text or "")):
+        lower = token.lower()
+        if lower in stopwords or lower in seen:
+            continue
+        seen.add(lower)
+        words.append(token)
+    if not words:
+        return "the passage"
+    return words[min(offset, len(words) - 1)]
+
+
+def _offline_fallback_questions(passage_text: str, requested_types: Optional[list[str]], exam: str) -> list[dict]:
+    sentences = _split_sentences(passage_text)
+    first = sentences[0] if sentences else ""
+    middle = sentences[len(sentences) // 2] if sentences else first
+    last = sentences[-1] if sentences else first
+    longest = max(sentences, key=len) if sentences else first
+    types = requested_types or [item[0] for item in READING_FILTER_OPTIONS.get(exam, [])[:4]]
+    questions = []
+
+    for index, qtype in enumerate(types[:5]):
+        keyword = _pick_keyword(passage_text, index)
+        if qtype in {"factual", "matching_information", "short_answer"}:
+            answer = _short_answer(first)
+            prompt = f"根据文章，关于“{keyword}”提到的关键信息是什么？"
+        elif qtype in {"inference", "negative_factual", "rhetorical_purpose", "matching_headings", "tfng"}:
+            answer = _short_answer(middle)
+            prompt = f"结合上下文，文章中“{keyword}”对应的核心意思是什么？"
+        elif qtype in {"vocabulary", "reference", "sentence_simplification", "insert_text"}:
+            answer = _short_answer(longest)
+            prompt = f"请解释文中与“{keyword}”相关的句子主要表达了什么。"
+        else:
+            answer = _short_answer(last)
+            prompt = f"请概括文章后半部分与“{keyword}”相关的核心信息。"
+
+        questions.append({
+            "id": f"offline_{qtype}_{index}",
+            "type": qtype,
+            "question": prompt,
+            "answer": answer,
+            "explanation": "离线 fallback 题：当前使用本地通用理解题保证训练不中断。",
+        })
+
+    return questions
+
+
+def _actual_question_types(questions: list[dict]) -> list[str]:
+    return sorted({q.get("type") for q in questions if isinstance(q, dict) and q.get("type")})
+
+
+def _build_session_payload(
+    sid: str,
+    passage_text: str,
+    questions: list[dict],
+    difficulty: str,
+    topic: str = "",
+    subject: Optional[str] = None,
+    exam: Optional[str] = None,
+    ai_generated: bool = False,
+    fallback_reason: Optional[str] = None,
+    requested_question_types: Optional[list[str]] = None,
+) -> dict:
+    payload = {
+        "session_id": sid,
+        "passage": passage_text,
+        "word_count": len(passage_text.split()),
+        "difficulty": difficulty,
+        "topic": topic,
+        "question_count": len(questions),
+        "has_questions": len(questions) > 0,
+        "ai_generated": ai_generated,
+        "question_types": _actual_question_types(questions),
+    }
+    if subject:
+        payload["subject"] = subject
+    if exam:
+        payload["exam"] = exam
+    if fallback_reason:
+        payload["fallback_reason"] = fallback_reason
+    if requested_question_types:
+        payload["requested_question_types"] = requested_question_types
+    return payload
+
+
+# ── TOEFL 2026 New Question Types ─────────────────────────────────────────────
+
+class CompleteWordsRequest(BaseModel):
+    passage: Optional[str] = None
+    cefr_level: Optional[str] = None
+
+
+class DailyLifeRequest(BaseModel):
+    text_type: str = "email"  # email, notice, menu, schedule, advertisement
+    cefr_level: Optional[str] = None
+
+
+@router.post("/toefl2026/complete-words")
+def generate_complete_words(req: CompleteWordsRequest):
+    """Generate TOEFL 2026 'Complete the Words' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_complete_words_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl2026/daily-life")
+def generate_daily_life(req: DailyLifeRequest):
+    """Generate TOEFL 2026 'Read in Daily Life' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    try:
+        result = ai.generate_daily_life_question(cefr, req.text_type)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+# ── Additional TOEFL Reading Question Types ──────────────────────────────────
+
+class TOEFLReadingRequest(BaseModel):
+    passage: Optional[str] = None
+    cefr_level: Optional[str] = None
+
+
+@router.post("/toefl/negative-factual")
+def generate_negative_factual(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Negative Factual Information' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_negative_factual_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl/rhetorical-purpose")
+def generate_rhetorical_purpose(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Rhetorical Purpose' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_rhetorical_purpose_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl/reference")
+def generate_reference(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Reference' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_reference_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl/sentence-simplification")
+def generate_sentence_simplification(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Sentence Simplification' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_sentence_simplification_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl/insert-text")
+def generate_insert_text(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Insert Text' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_insert_text_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl/prose-summary")
+def generate_prose_summary(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Prose Summary' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_prose_summary_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/toefl/fill-table")
+def generate_fill_table(req: TOEFLReadingRequest):
+    """Generate TOEFL 'Fill in a Table' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "toefl", cefr, "No passages found")
+
+    try:
+        result = ai.generate_fill_table_question(passage, cefr)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
 
 # ── Pool database ──────────────────────────────────────────────────────────────
 _pool_db: Optional[sqlite3.Connection] = None
@@ -42,13 +677,14 @@ def _get_pool_db() -> sqlite3.Connection:
     if _pool_db is not None:
         return _pool_db
     try:
-        from gui.deps import load_config
+        from gui.deps import load_config, _CONFIG_PATH
         import sys
         cfg = load_config()
         raw = cfg.get("data_dir", "data")
-        base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(".")
-        data_dir = Path(raw) if Path(raw).is_absolute() else base / raw
-        data_dir.mkdir(parents=True, exist_ok=True)
+        data_dir = Path(raw) if Path(raw).is_absolute() else _CONFIG_PATH.parent / raw
+        # Only create directory if it doesn't exist (user may have set custom path)
+        if not data_dir.exists():
+            data_dir.mkdir(parents=True, exist_ok=True)
         db_path = data_dir / "reading_pool.db"
     except Exception:
         db_path = Path(tempfile.gettempdir()) / "reading_pool.db"
@@ -135,30 +771,45 @@ async def _replenish_pool(target_exam: str = "general", cefr: str = "B1") -> Non
                 seen = user_model.get_seen_ids(profile.user_id) if profile else []
                 rows = kb.get_by_type(
                     content_type="reading", difficulty=diff,
-                    exam=exam, exclude_ids=seen, limit=10, random_order=True
+                    exam=exam, exclude_ids=seen, limit=24, random_order=True
                 )
-                if rows:
-                    row = max(rows, key=lambda r: len(r["text"]))
-                    passage_text = row["text"]
-                    chunk_id = row["chunk_id"]
-                    questions = []
-                    try:
-                        meta = json.loads(row.get("metadata_json") or "{}")
-                        cached = meta.get("questions")
-                        if cached:
-                            questions = json.loads(cached) if isinstance(cached, str) else cached
-                    except Exception:
-                        pass
-                    if not questions:
+                passages = _coalesce_passages(kb, rows, seen_chunk_ids=seen, limit=3)
+                if passages:
+                    passage = passages[0]
+                    if _needs_ai_passage_upgrade(exam, passage.word_count):
+                        gen = ai.generate_reading_passage(
+                            cefr_level=passage.difficulty or diff,
+                            exam=exam,
+                            topic=passage.topic,
+                        )
                         questions = ai.generate_comprehension_questions(
-                            passage=passage_text, cefr_level=diff,
+                            passage=gen["passage"], cefr_level=gen["difficulty"],
                             num_questions=5, exam=exam
                         ) or []
-                    data = {"passage": passage_text, "chunk_id": chunk_id,
-                            "questions": questions, "difficulty": diff,
-                            "topic": row.get("topic", ""),
-                            "word_count": len(passage_text.split()),
-                            "ai_generated": False}
+                        data = {"passage": gen["passage"],
+                                "chunk_id": f"ai_{uuid.uuid4().hex[:8]}",
+                                "questions": questions, "difficulty": gen["difficulty"],
+                                "topic": gen.get("topic", passage.topic),
+                                "subject": passage.subject,
+                                "word_count": gen["word_count"], "ai_generated": True}
+                    else:
+                        passage_text = passage.passage_text
+                        chunk_id = passage.chunk_id
+                        questions = list(passage.questions)
+                        if not questions:
+                            questions = ai.generate_comprehension_questions(
+                                passage=passage_text, cefr_level=diff,
+                                num_questions=5, exam=exam
+                            ) or []
+                        if questions:
+                            _cache_passage_questions(kb, passage, questions)
+                        data = {"passage": passage_text, "chunk_id": chunk_id,
+                                "chunk_ids": passage.chunk_ids,
+                                "questions": questions, "difficulty": diff,
+                                "topic": passage.topic,
+                                "subject": passage.subject,
+                                "word_count": passage.word_count,
+                                "ai_generated": False}
                 else:
                     gen = ai.generate_reading_passage(cefr_level=diff, exam=exam)
                     questions = ai.generate_comprehension_questions(
@@ -225,10 +876,11 @@ def start_session(exam: Optional[str] = None):
     pooled = _pool_pop(target_exam, cefr)
     if pooled:
         passage_text = pooled["passage"]
-        questions    = pooled["questions"]
+        questions = pooled["questions"] or _offline_fallback_questions(passage_text, None, target_exam)
         chunk_id     = pooled["chunk_id"]
+        fallback_reason = None if pooled["questions"] else "当前题目来自离线 fallback，避免无题可做。"
         if not pooled.get("ai_generated"):
-            user_model.mark_seen(profile.user_id, [chunk_id])
+            user_model.mark_seen(profile.user_id, pooled.get("chunk_ids") or [chunk_id])
         sid = uuid.uuid4().hex[:12]
         db_sid = user_model.start_session(profile.user_id, "reading")
         _sessions[sid] = ReadingSession(
@@ -237,16 +889,19 @@ def start_session(exam: Optional[str] = None):
             chunk_id=chunk_id, questions=questions,
         )
         _schedule_replenish(target_exam, cefr)
-        return {
-            "session_id": sid,
-            "passage": passage_text,
-            "word_count": pooled.get("word_count", len(passage_text.split())),
-            "difficulty": pooled.get("difficulty", cefr),
-            "topic": pooled.get("topic", ""),
-            "question_count": len(questions),
-            "has_questions": len(questions) > 0,
-            "ai_generated": pooled.get("ai_generated", False),
-        }
+        payload = _build_session_payload(
+            sid=sid,
+            passage_text=passage_text,
+            questions=questions,
+            difficulty=pooled.get("difficulty", cefr),
+            topic=pooled.get("topic", ""),
+            subject=pooled.get("subject"),
+            exam=target_exam,
+            ai_generated=pooled.get("ai_generated", False),
+            fallback_reason=fallback_reason,
+        )
+        payload["word_count"] = pooled.get("word_count", len(passage_text.split()))
+        return payload
 
     # Pool empty — fall through to on-demand generation
     seen = user_model.get_seen_ids(profile.user_id)
@@ -256,12 +911,14 @@ def start_session(exam: Optional[str] = None):
         difficulty=profile.cefr_level,
         exam=target_exam,
         exclude_ids=seen,
-        limit=6,
+        limit=24,
         random_order=True,
     )
-    if not rows:
-        rows = kb.get_by_type(content_type="reading", difficulty=profile.cefr_level, limit=6, random_order=True)
-    if not rows:
+    passages = _coalesce_passages(kb, rows, seen_chunk_ids=seen, limit=4)
+    if not passages:
+        rows = kb.get_by_type(content_type="reading", difficulty=profile.cefr_level, limit=24, random_order=True)
+        passages = _coalesce_passages(kb, rows, limit=4)
+    if not passages:
         # No KB content — generate a passage with AI if available
         if not ai:
             return {"error": "no_passages", "message": "No reading passages found. Please add content files and run ingest, or configure an API key to generate passages automatically."}
@@ -285,6 +942,10 @@ def start_session(exam: Optional[str] = None):
             ) or []
         except Exception:
             questions = []
+        fallback_reason = None
+        if not questions:
+            questions = _offline_fallback_questions(passage_text, None, target_exam)
+            fallback_reason = "AI 未返回题目，已回退为离线 comprehension 题。"
 
         # Save AI-generated passage to KB warehouse for future reuse
         try:
@@ -292,14 +953,14 @@ def start_session(exam: Optional[str] = None):
             import json as _json
             chunk = Chunk(
                 chunk_id=chunk_id,
-                source_file="ai_warehouse",
+                source_file=f"ai_warehouse/{chunk_id}.md",
                 content_type=ContentType.READING,
                 difficulty=gen["difficulty"],
                 topic=gen["topic"],
                 exam=target_exam,
                 language="en",
                 text=passage_text,
-                metadata={"questions": _json.dumps(questions), "ai_generated": True},
+                metadata={"questions": questions, "ai_generated": True},
             )
             kb.add_chunks([chunk])
         except Exception:
@@ -315,63 +976,73 @@ def start_session(exam: Optional[str] = None):
             questions=questions,
         )
         _schedule_replenish(target_exam, cefr)
-        return {
-            "session_id": sid,
-            "passage": passage_text,
-            "word_count": gen["word_count"],
-            "difficulty": gen["difficulty"],
-            "topic": gen["topic"],
-            "question_count": len(questions),
-            "has_questions": len(questions) > 0,
-            "ai_generated": True,
-        }
+        payload = _build_session_payload(
+            sid=sid,
+            passage_text=passage_text,
+            questions=questions,
+            difficulty=gen["difficulty"],
+            topic=gen["topic"],
+            subject=gen.get("subject"),
+            exam=target_exam,
+            ai_generated=True,
+            fallback_reason=fallback_reason,
+        )
+        payload["word_count"] = gen["word_count"]
+        return payload
 
-    passage_row = max(rows, key=lambda r: len(r["text"]))
-    passage_text = passage_row["text"]
-    chunk_id = passage_row["chunk_id"]
-    user_model.mark_seen(profile.user_id, [chunk_id])
+    passage = passages[0]
+    fallback_reason = None
+    ai_generated = False
 
-    # Try to reuse cached questions from KB metadata first
-    questions = []
-    try:
-        import json as _json
-        meta_json = passage_row["metadata_json"] if hasattr(passage_row, "__getitem__") else None
-        if meta_json:
-            meta_dict = _json.loads(meta_json)
-            cached_q = meta_dict.get("questions")
-            if cached_q:
-                questions = _json.loads(cached_q) if isinstance(cached_q, str) else cached_q
-    except Exception:
-        questions = []
-
-    # Generate questions with AI if not cached
-    if not questions and ai:
+    if ai and _needs_ai_passage_upgrade(target_exam, passage.word_count):
+        _mark_passage_seen(user_model, profile.user_id, passage)
         try:
+            gen = ai.generate_reading_passage(
+                cefr_level=passage.difficulty or profile.cefr_level,
+                exam=target_exam,
+                topic=passage.topic,
+            )
+            passage_text = gen["passage"]
+            chunk_id = f"ai_quality_{uuid.uuid4().hex[:8]}"
             questions = ai.generate_comprehension_questions(
                 passage=passage_text,
-                cefr_level=profile.cefr_level,
+                cefr_level=gen["difficulty"],
                 num_questions=5,
                 exam=target_exam,
             ) or []
-            # Cache questions back into KB metadata
-            if questions:
-                try:
-                    import json as _json
-                    existing_meta = {}
-                    try:
-                        existing_meta = _json.loads(passage_row["metadata_json"] or "{}")
-                    except Exception:
-                        pass
-                    existing_meta["questions"] = _json.dumps(questions)
-                    kb._sql.execute(
-                        "UPDATE chunks SET metadata_json=? WHERE chunk_id=?",
-                        (_json.dumps(existing_meta), chunk_id),
-                    )
-                    kb._sql.commit()
-                except Exception:
-                    pass
+            ai_generated = True
+            fallback_reason = "内置素材篇幅偏短，已自动升级为 AI 长篇文章。"
+            if not questions:
+                questions = _offline_fallback_questions(passage_text, None, target_exam)
+                fallback_reason += " AI 未返回题目，已回退为离线 comprehension 题。"
         except Exception:
-            questions = []
+            ai_generated = False
+            fallback_reason = None
+
+    if not ai_generated:
+        passage_text = passage.passage_text
+        chunk_id = passage.chunk_id
+        _mark_passage_seen(user_model, profile.user_id, passage)
+
+        # Try to reuse cached questions from KB metadata first
+        questions = list(passage.questions)
+
+        # Generate questions with AI if not cached
+        if not questions and ai:
+            try:
+                questions = ai.generate_comprehension_questions(
+                    passage=passage_text,
+                    cefr_level=passage.difficulty or profile.cefr_level,
+                    num_questions=5,
+                    exam=target_exam,
+                ) or []
+                if questions:
+                    _cache_passage_questions(kb, passage, questions)
+            except Exception:
+                questions = []
+        if not questions:
+            questions = _offline_fallback_questions(passage_text, None, target_exam)
+            fallback_reason = "当前题目来自离线 fallback，避免无题可做。"
 
     sid = uuid.uuid4().hex[:12]
     db_sid = user_model.start_session(profile.user_id, "reading")
@@ -384,17 +1055,20 @@ def start_session(exam: Optional[str] = None):
         questions=questions,
     )
 
-    meta = passage_row
-    asyncio.create_task(_maybe_replenish(target_exam, cefr))
-    return {
-        "session_id": sid,
-        "passage": passage_text,
-        "word_count": len(passage_text.split()),
-        "difficulty": meta.get("difficulty", "?") if hasattr(meta, "get") else "?",
-        "topic": meta.get("topic", "") if hasattr(meta, "get") else "",
-        "question_count": len(questions),
-        "has_questions": len(questions) > 0,
-    }
+    _schedule_replenish(target_exam, cefr)
+    payload = _build_session_payload(
+        sid=sid,
+        passage_text=passage_text,
+        questions=questions,
+        difficulty=gen["difficulty"] if ai_generated else passage.difficulty,
+        topic=gen.get("topic", passage.topic) if ai_generated else passage.topic,
+        subject=passage.subject,
+        exam=target_exam,
+        ai_generated=ai_generated,
+        fallback_reason=fallback_reason,
+    )
+    payload["word_count"] = len(passage_text.split()) if ai_generated else passage.word_count
+    return payload
 
 
 class AnswerRequest(BaseModel):
@@ -460,4 +1134,534 @@ def get_question(session_id: str, index: int):
         "question": q.get("question", ""),
         "type": q.get("type", "factual"),
         "options": q.get("options", []),
+    }
+
+
+# ── IELTS Reading Question Types ─────────────────────────────────────────────
+
+class IELTSReadingRequest(BaseModel):
+    passage: Optional[str] = None
+    cefr_level: Optional[str] = None
+
+
+@router.post("/ielts/tfng")
+def generate_ielts_tfng(req: IELTSReadingRequest):
+    """Generate IELTS 'True/False/Not Given' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "ielts", cefr, "No IELTS passages found")
+
+    try:
+        from ai.reading_question_generators import generate_ielts_tfng_question
+        result = generate_ielts_tfng_question(passage, cefr, ai)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/ielts/matching-headings")
+def generate_ielts_matching_headings(req: IELTSReadingRequest):
+    """Generate IELTS 'Matching Headings' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "ielts", cefr, "No IELTS passages found")
+
+    try:
+        from ai.reading_question_generators import generate_ielts_matching_headings
+        result = generate_ielts_matching_headings(passage, cefr, ai)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+class IELTSCompletionRequest(BaseModel):
+    passage: Optional[str] = None
+    completion_type: str = "summary"  # summary, note, table
+    cefr_level: Optional[str] = None
+
+
+@router.post("/ielts/completion")
+def generate_ielts_completion(req: IELTSCompletionRequest):
+    """Generate IELTS completion question (Summary/Note/Table)."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "ielts", cefr, "No IELTS passages found")
+
+    try:
+        from ai.reading_question_generators import generate_ielts_completion_question
+        result = generate_ielts_completion_question(passage, req.completion_type, cefr, ai)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+class IELTSMatchingRequest(BaseModel):
+    passage: Optional[str] = None
+    matching_type: str = "information"  # information, features, sentence_endings
+    cefr_level: Optional[str] = None
+
+
+@router.post("/ielts/matching")
+def generate_ielts_matching(req: IELTSMatchingRequest):
+    """Generate IELTS matching question (Information/Features/Sentence Endings)."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "ielts", cefr, "No IELTS passages found")
+
+    try:
+        from ai.reading_question_generators import generate_ielts_matching_question
+        result = generate_ielts_matching_question(passage, req.matching_type, cefr, ai)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/ielts/short-answer")
+def generate_ielts_short_answer(req: IELTSReadingRequest):
+    """Generate IELTS 'Short Answer' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "ielts", cefr, "No IELTS passages found")
+
+    try:
+        from ai.reading_question_generators import generate_ielts_short_answer
+        result = generate_ielts_short_answer(passage, cefr, ai)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+@router.post("/ielts/diagram-label")
+def generate_ielts_diagram_label(req: IELTSReadingRequest):
+    """Generate IELTS 'Diagram Label' question."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not ai:
+        raise HTTPException(400, "AI client not configured")
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = req.cefr_level or profile.cefr_level or "B2"
+
+    passage = _load_generation_passage_text(kb, req.passage, "ielts", cefr, "No IELTS passages found")
+
+    try:
+        from ai.reading_question_generators import generate_ielts_diagram_label
+        result = generate_ielts_diagram_label(passage, cefr, ai)
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Generation failed: {e}")
+
+
+# ── Filtered Practice Mode ───────────────────────────────────────────────────
+
+class FilteredPracticeRequest(BaseModel):
+    exam: str  # toefl/ielts
+    difficulty: Optional[int] = None  # 1-10 scale
+    subject: Optional[str] = None
+    topic: Optional[str] = None
+    question_types: Optional[list[str]] = None
+    practice_mode: str = "single"  # single/mock/targeted
+
+
+@router.post("/start-filtered")
+def start_filtered_session(req: FilteredPracticeRequest):
+    """Start a reading session with multi-dimensional filtering."""
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    cefr = _cefr_from_difficulty(req.difficulty, profile.cefr_level or "B2")
+
+    seen = user_model.get_seen_ids(profile.user_id)
+    fallback_notes: list[str] = []
+
+    def _load_filtered_rows(exclude_seen: bool) -> list:
+        if req.subject or req.topic:
+            conditions = [
+                "content_type = ?",
+                "exam = ?",
+                "difficulty = ?",
+            ]
+            params = ["reading", req.exam, cefr]
+            if req.subject:
+                conditions.append("subject_category = ?")
+                params.append(req.subject)
+            if req.topic:
+                conditions.append("LOWER(topic) LIKE ?")
+                params.append(f"%{req.topic.lower()}%")
+            if exclude_seen and seen:
+                conditions.append(f"chunk_id NOT IN ({','.join('?' * len(seen))})")
+                params.extend(seen)
+            params.append(24)
+            return kb._sql.execute(
+                f"""SELECT rowid, *
+                    FROM chunks
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY RANDOM() LIMIT ?""",
+                params
+            ).fetchall()
+
+        query_params = {
+            "content_type": "reading",
+            "difficulty": cefr,
+            "exam": req.exam,
+            "limit": 24,
+            "random_order": True,
+        }
+        if exclude_seen:
+            query_params["exclude_ids"] = seen
+        return kb.get_by_type(**query_params)
+
+    rows = _load_filtered_rows(exclude_seen=True)
+    passages = _coalesce_passages(kb, rows, seen_chunk_ids=seen, limit=5)
+    if not passages:
+        rows = _load_filtered_rows(exclude_seen=False)
+        passages = _coalesce_passages(kb, rows, limit=5)
+    if not passages and (req.subject or req.topic):
+        fallback_notes.append("未找到完全匹配的主题筛选，已放宽到同考试同难度素材。")
+        query_params = {
+            "content_type": "reading",
+            "difficulty": cefr,
+            "exam": req.exam,
+            "limit": 24,
+            "random_order": True,
+        }
+        if seen:
+            query_params["exclude_ids"] = seen
+        rows = kb.get_by_type(**query_params)
+        passages = _coalesce_passages(kb, rows, seen_chunk_ids=seen, limit=5)
+        if not passages:
+            rows = kb.get_by_type(
+                content_type="reading",
+                difficulty=cefr,
+                exam=req.exam,
+                limit=24,
+                random_order=True,
+            )
+            passages = _coalesce_passages(kb, rows, limit=5)
+
+    if not passages:
+        # No passages found - try AI generation if available
+        if not ai:
+            raise HTTPException(404, "No passages found matching filters")
+
+        try:
+            # Generate passage with AI
+            from ai.question_distribution import generate_questions_with_distribution, TOEFL_STANDARD_DISTRIBUTION, IELTS_STANDARD_DISTRIBUTION
+
+            gen = ai.generate_reading_passage(
+                cefr_level=cefr,
+                exam=req.exam,
+                topic=req.subject or "general",
+            )
+            passage_text = gen["passage"]
+
+            # Generate questions with specified types or use standard distribution
+            if req.question_types:
+                # Custom distribution based on requested types
+                distribution = {qt: 2 for qt in req.question_types}
+            else:
+                # Use standard distribution
+                distribution = TOEFL_STANDARD_DISTRIBUTION if req.exam == "toefl" else IELTS_STANDARD_DISTRIBUTION
+
+            questions = generate_questions_with_distribution(
+                passage=passage_text,
+                question_types=req.question_types or list(distribution.keys()),
+                distribution=distribution,
+                difficulty=req.difficulty or 5,
+                exam=req.exam,
+                cefr_level=cefr,
+                ai_client=ai,
+            )
+
+            chunk_id = f"ai_filtered_{uuid.uuid4().hex[:8]}"
+            passage_subject = req.subject or gen.get("subject") or gen.get("topic", "")
+            passage_topic = req.topic or gen.get("topic", "")
+            passage_difficulty = gen.get("difficulty", cefr)
+            passage_word_count = len(passage_text.split())
+            fallback_notes.append("当前素材由 AI 生成，以满足筛选条件。")
+
+        except Exception as e:
+            raise HTTPException(500, f"AI generation failed: {e}")
+    else:
+        # Use passage from KB
+        passage = passages[0]
+        passage_text = passage.passage_text
+        chunk_id = passage.chunk_id
+        passage_subject = req.subject or passage.subject
+        passage_topic = req.topic or passage.topic
+        passage_difficulty = passage.difficulty or cefr
+        passage_word_count = passage.word_count
+        upgraded = False
+
+        if ai and _needs_ai_passage_upgrade(req.exam, passage.word_count):
+            try:
+                from ai.question_distribution import generate_questions_with_distribution, TOEFL_STANDARD_DISTRIBUTION, IELTS_STANDARD_DISTRIBUTION
+
+                gen = ai.generate_reading_passage(
+                    cefr_level=passage.difficulty or cefr,
+                    exam=req.exam,
+                    topic=req.topic or req.subject or passage.topic,
+                )
+                passage_text = gen["passage"]
+                chunk_id = f"ai_filtered_{uuid.uuid4().hex[:8]}"
+                passage_topic = req.topic or gen.get("topic", passage.topic)
+                passage_difficulty = gen.get("difficulty", cefr)
+                passage_word_count = len(passage_text.split())
+                _mark_passage_seen(user_model, profile.user_id, passage)
+
+                if req.question_types:
+                    distribution = {qt: 2 for qt in req.question_types}
+                else:
+                    distribution = TOEFL_STANDARD_DISTRIBUTION if req.exam == "toefl" else IELTS_STANDARD_DISTRIBUTION
+
+                questions = generate_questions_with_distribution(
+                    passage=passage_text,
+                    question_types=req.question_types or list(distribution.keys()),
+                    distribution=distribution,
+                    difficulty=req.difficulty or 5,
+                    exam=req.exam,
+                    cefr_level=cefr,
+                    ai_client=ai,
+                )
+                fallback_notes.append("本地素材篇幅不足，已自动升级为 AI 长篇文章。")
+                upgraded = True
+            except Exception:
+                upgraded = False
+
+        if not upgraded:
+            # Parse existing questions or generate new ones
+            try:
+                questions = list(passage.questions)
+
+                # Filter questions by type if specified
+                if req.question_types and questions:
+                    filtered = [q for q in questions if q.get("type") in req.question_types]
+                    if filtered:
+                        questions = filtered
+                    else:
+                        fallback_notes.append("当前素材没有精确匹配题型，已回退为本篇通用题。")
+                        questions = questions[: min(len(questions), 5)]
+
+                # If no questions or filtered out all questions, generate new ones
+                if not questions and ai:
+                    from ai.question_distribution import generate_questions_with_distribution, TOEFL_STANDARD_DISTRIBUTION, IELTS_STANDARD_DISTRIBUTION
+
+                    if req.question_types:
+                        distribution = {qt: 2 for qt in req.question_types}
+                    else:
+                        distribution = TOEFL_STANDARD_DISTRIBUTION if req.exam == "toefl" else IELTS_STANDARD_DISTRIBUTION
+
+                    questions = generate_questions_with_distribution(
+                        passage=passage_text,
+                        question_types=req.question_types or list(distribution.keys()),
+                        distribution=distribution,
+                        difficulty=req.difficulty or 5,
+                        exam=req.exam,
+                        cefr_level=cefr,
+                        ai_client=ai,
+                    )
+                    if questions:
+                        _cache_passage_questions(kb, passage, questions)
+            except Exception:
+                questions = []
+
+            _mark_passage_seen(user_model, profile.user_id, passage)
+
+    if not questions:
+        questions = _offline_fallback_questions(passage_text, req.question_types, req.exam)
+        fallback_notes.append("当前使用离线 fallback 题，保证训练不中断。")
+
+    # Create session
+    sid = uuid.uuid4().hex[:12]
+    db_sid = user_model.start_session(profile.user_id, "reading")
+    _sessions[sid] = ReadingSession(
+        session_id=sid,
+        user_id=profile.user_id,
+        db_session_id=db_sid,
+        passage=passage_text,
+        chunk_id=chunk_id,
+        questions=questions,
+    )
+
+    payload = _build_session_payload(
+        sid=sid,
+        passage_text=passage_text,
+        questions=questions,
+        difficulty=passage_difficulty,
+        topic=passage_topic,
+        subject=passage_subject,
+        exam=req.exam,
+        ai_generated=chunk_id.startswith("ai_filtered_"),
+        fallback_reason=" ".join(fallback_notes) if fallback_notes else None,
+        requested_question_types=req.question_types,
+    )
+    payload["word_count"] = passage_word_count
+    payload["difficulty_score"] = req.difficulty
+    payload["practice_mode"] = req.practice_mode
+    return payload
+
+
+@router.get("/passages/library")
+def get_passage_library(
+    exam: str,
+    difficulty_min: int = 1,
+    difficulty_max: int = 10,
+    subject: Optional[str] = None,
+    topic: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """Browse reading passage library with filters."""
+    kb, srs, user_model, ai, profile = get_components()
+
+    # Build query
+    conditions = ["content_type = 'reading'", "exam = ?"]
+    params = [exam]
+
+    # Map difficulty scores to CEFR for filtering
+    cefr_levels = []
+    if difficulty_min <= 3:
+        cefr_levels.append("B1")
+    if difficulty_min <= 5 and difficulty_max >= 3:
+        cefr_levels.append("B2")
+    if difficulty_min <= 7 and difficulty_max >= 5:
+        cefr_levels.append("C1")
+    if difficulty_max >= 7:
+        cefr_levels.append("C2")
+
+    if cefr_levels:
+        placeholders = ','.join('?' * len(cefr_levels))
+        conditions.append(f"difficulty IN ({placeholders})")
+        params.extend(cefr_levels)
+
+    if subject:
+        conditions.append("subject_category = ?")
+        params.append(subject)
+    if topic:
+        conditions.append("LOWER(topic) LIKE ?")
+        params.append(f"%{topic.lower()}%")
+
+    query = f"""
+        SELECT rowid, *
+        FROM chunks
+        WHERE {' AND '.join(conditions)}
+        ORDER BY difficulty_score, topic, rowid
+    """
+
+    rows = kb._sql.execute(query, params).fetchall()
+    all_passages = _coalesce_passages(kb, rows)
+    visible_passages = all_passages[offset : offset + limit]
+
+    passages = []
+    for passage in visible_passages:
+        preview = passage.passage_text.replace("\r", " ").replace("\n", " ").strip()
+        if len(preview) > 200:
+            preview = preview[:200].rstrip() + "..."
+        passages.append({
+            "chunk_id": passage.chunk_id,
+            "difficulty": passage.difficulty,
+            "difficulty_score": passage.difficulty_score,
+            "topic": passage.topic,
+            "subject": passage.subject,
+            "word_count": passage.word_count,
+            "estimated_time": passage.estimated_time,
+            "question_types": passage.question_types,
+            "source_quality": passage.source_quality,
+            "preview": preview,
+        })
+
+    return {
+        "passages": passages,
+        "total": len(all_passages),
+        "limit": limit,
+        "offset": offset,
+        "filters": {
+            "exam": exam,
+            "difficulty_range": [difficulty_min, difficulty_max],
+            "subject": subject,
+            "topic": topic,
+        }
+    }
+
+
+@router.get("/filters/meta")
+def get_filter_meta(exam: str):
+    kb, srs, user_model, ai, profile = get_components()
+
+    rows = kb._sql.execute(
+        """SELECT chunk_id, source_file, topic, subject_category
+           FROM chunks
+           WHERE content_type = 'reading' AND exam = ?""",
+        (exam,),
+    ).fetchall()
+
+    topic_counts: dict[str, int] = {}
+    subject_counts: dict[str, int] = {}
+    seen_keys: set[str] = set()
+    for row in rows:
+        group_key = _passage_group_key(row)
+        if group_key in seen_keys:
+            continue
+        seen_keys.add(group_key)
+
+        topic = str(_row_value(row, "topic", "") or "").strip()
+        subject = str(_row_value(row, "subject_category", "") or "").strip()
+        if topic:
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        if subject:
+            subject_counts[subject] = subject_counts.get(subject, 0) + 1
+
+    topic_rows = [
+        {"value": key, "count": value}
+        for key, value in sorted(topic_counts.items(), key=lambda item: (-item[1], item[0]))[:24]
+    ]
+    subject_rows = [
+        {"value": key, "count": value}
+        for key, value in sorted(subject_counts.items(), key=lambda item: (-item[1], item[0]))[:24]
+    ]
+
+    return {
+        "exam": exam,
+        "question_types": [
+            {"id": key, "label": label}
+            for key, label in READING_FILTER_OPTIONS.get(exam, [])
+        ],
+        "topics": topic_rows,
+        "subjects": subject_rows,
+        "difficulty_bands": [
+            {"id": "easy", "label": "Easy", "min": 1, "max": 3, "score": 3},
+            {"id": "balanced", "label": "Balanced", "min": 4, "max": 6, "score": 5},
+            {"id": "hard", "label": "Hard", "min": 7, "max": 10, "score": 8},
+        ],
     }

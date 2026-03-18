@@ -1,33 +1,89 @@
 """
-License verification for English Coach Cloud Edition.
+License verification helpers for English Coach Cloud Edition.
 
-Key format: XXXX-XXXX-XXXX-XXXX  (16 random hex chars, opaque)
-  - Days and serial stored in Cloudflare KV at generation time
-  - No offline forgery possible — validation requires KV lookup
+Key format: XXXX-XXXX-XXXX-XXXX (opaque, registered server-side only)
 
-Activation record stored locally as "{key}|{machine_id}|{activate_ts}|{hmac}"
-  - hmac = HMAC-SHA256(key|machine_id|activate_ts, _FILE_SIGN_KEY)
-  - tampering with any field invalidates the hmac
+Current local record format:
+  v2|key|machine_id|activate_ts|days|payload_kind|payload_hex|hmac
+
+Security properties:
+  - Only server-registered keys can activate.
+  - Activation timestamp is issued by the server.
+  - The local HMAC covers key, machine, activate_ts, days, payload kind,
+    and encrypted payload, so editing any field invalidates the record.
+  - The real upstream AI provider key never needs to leave the backend.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import json
 import os
 import platform
 import re
+import sys
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 
-# Local file signing key — prevents timestamp tampering
-_FILE_SIGN_KEY = b"ec-file-sign-v1-Kq7mXpR2nLsT9wYv"
+from gui import cloud_license_defaults
 
-# Cloudflare Worker URL
-WORKER_URL = os.environ.get("EC_WORKER_URL", "https://english-coach-license.pages.dev")
+_FILE_SIGN_KEY = b"ec-file-sign-v2-pB4mQx2Lr9Ns7Kv1"
+_LICENSE_RECORD_VERSION = "v2"
+_PAYLOAD_KIND_PROXY_TOKEN = "proxy_token"
 
-# Worker auth token — must match WORKER_SECRET set in Cloudflare
-# For open source users: this is only used in the commercial cloud edition
-WORKER_TOKEN = os.environ.get("EC_WORKER_TOKEN", "")
+
+def _candidate_activation_config_paths() -> list[Path]:
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+        return [base / "cloud_activation_config.json"]
+    root = Path(__file__).resolve().parents[1]
+    return [
+        root / "cloud_activation_config.json",
+        root / "releases" / "cloud_activation_config.json",
+    ]
+
+
+def _load_runtime_activation_config() -> dict:
+    for path in _candidate_activation_config_paths():
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+_RUNTIME_CFG = _load_runtime_activation_config()
+
+WORKER_URL = os.environ.get(
+    "EC_WORKER_URL",
+    str(_RUNTIME_CFG.get("worker_url", cloud_license_defaults.WORKER_URL)),
+).strip()
+WORKER_CLIENT_TOKEN = os.environ.get(
+    "EC_WORKER_CLIENT_TOKEN",
+    os.environ.get(
+        "EC_WORKER_TOKEN",
+        str(_RUNTIME_CFG.get("client_token", cloud_license_defaults.CLIENT_TOKEN)),
+    ),
+).strip()
+
+
+@dataclass
+class LicenseRecord:
+    format: str
+    key: str = ""
+    machine_id: str = ""
+    activate_ts: int = 0
+    days: int = 0
+    payload_kind: str = ""
+    payload_hex: str = ""
+    sig: str = ""
 
 
 def get_machine_id() -> str:
@@ -41,133 +97,232 @@ def get_machine_id() -> str:
 
 
 def verify_key_format(key: str) -> dict:
-    """
-    Verify key format only (opaque hex, no offline checksum).
-    Returns {"valid": bool, "days": 0, "error": str}
-    Days are unknown until Cloudflare KV lookup at activation time.
-    """
+    """Verify opaque key format only."""
     norm = key.strip().upper().replace("-", "")
     if not re.fullmatch(r"[0-9A-F]{16}", norm):
         return {"valid": False, "days": 0, "error": "Key 格式无效"}
     return {"valid": True, "days": 0, "error": ""}
 
 
-def _make_hmac(key: str, machine_id: str, activate_ts: int) -> str:
-    msg = f"{key}|{machine_id}|{activate_ts}".encode()
+def get_activation_capability() -> dict:
+    """Return whether this build is configured to activate cloud licenses."""
+    if WORKER_URL and WORKER_CLIENT_TOKEN:
+        return {"available": True, "reason": ""}
+    if not WORKER_URL and not WORKER_CLIENT_TOKEN:
+        return {
+            "available": False,
+            "reason": "当前构建未配置激活服务。没有服务器时请直接使用自己的 API key；无 API key 也可使用离线功能。",
+        }
+    if not WORKER_URL:
+        return {"available": False, "reason": "缺少 EC_WORKER_URL，无法连接激活服务。"}
+    return {"available": False, "reason": "缺少 EC_WORKER_CLIENT_TOKEN，无法连接激活服务。"}
+
+
+def _make_hmac_v2(
+    key: str,
+    machine_id: str,
+    activate_ts: int,
+    days: int,
+    payload_kind: str,
+    payload_hex: str,
+) -> str:
+    msg = (
+        f"{_LICENSE_RECORD_VERSION}|{key}|{machine_id}|{activate_ts}|{days}|"
+        f"{payload_kind}|{payload_hex}"
+    ).encode()
     return hmac.new(_FILE_SIGN_KEY, msg, hashlib.sha256).hexdigest()
 
 
-def verify_license(key: str, machine_id: str, activate_ts: int, sig: str) -> dict:
+def _derive_local_encrypt_key(key: str, machine_id: str) -> str:
+    norm = key.strip().upper().replace("-", "")
+    seed = f"{norm}:{machine_id}:{_FILE_SIGN_KEY.hex()}"
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+def _xor_with_key_hex(data: bytes, key_hex: str) -> bytes:
+    key_bytes = bytes.fromhex(key_hex)
+    return bytes(data[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(data)))
+
+
+def encrypt_local_payload(key: str, machine_id: str, payload: str) -> str:
+    encrypted = _xor_with_key_hex(payload.encode("utf-8"), _derive_local_encrypt_key(key, machine_id))
+    return encrypted.hex()
+
+
+def decrypt_local_payload(key: str, machine_id: str, encrypted_hex: str) -> str:
+    data = bytes.fromhex(encrypted_hex)
+    decoded = _xor_with_key_hex(data, _derive_local_encrypt_key(key, machine_id)).decode("utf-8")
+    if not decoded:
+        raise ValueError("空的 license 载荷")
+    return decoded
+
+
+def make_license_record(
+    key: str,
+    machine_id: str,
+    activate_ts: int,
+    days: int,
+    payload_kind: str,
+    payload_hex: str,
+) -> str:
+    sig = _make_hmac_v2(key, machine_id, activate_ts, days, payload_kind, payload_hex)
+    return (
+        f"{_LICENSE_RECORD_VERSION}|{key}|{machine_id}|{activate_ts}|{days}|"
+        f"{payload_kind}|{payload_hex}|{sig}"
+    )
+
+
+def parse_license_record(content: str) -> LicenseRecord:
+    parts = content.strip().split("|")
+    if len(parts) == 8 and parts[0] == _LICENSE_RECORD_VERSION:
+        try:
+            return LicenseRecord(
+                format="v2",
+                key=parts[1],
+                machine_id=parts[2],
+                activate_ts=int(parts[3]),
+                days=int(parts[4]),
+                payload_kind=parts[5],
+                payload_hex=parts[6],
+                sig=parts[7],
+            )
+        except ValueError:
+            return LicenseRecord(format="invalid")
+    if len(parts) == 6:
+        return LicenseRecord(format="legacy_embedded")
+    if len(parts) == 5:
+        return LicenseRecord(format="legacy_env")
+    if len(parts) == 4:
+        return LicenseRecord(format="legacy")
+    return LicenseRecord(format="invalid")
+
+
+def verify_license_record(record: LicenseRecord) -> dict:
     """
-    Verify a saved license given its fields and HMAC signature.
-    Returns {"valid": bool, "days_left": int, "error": str}
-    Requires days to be stored alongside (passed via activate_ts record).
+    Verify a parsed record.
+
+    Returns:
+      {"valid": bool, "days_left": int, "error": str, "needs_reactivation": bool}
     """
-    fmt = verify_key_format(key)
+    if record.format != "v2":
+        if record.format.startswith("legacy"):
+            return {
+                "valid": False,
+                "days_left": 0,
+                "error": "旧版 License 格式已停用，请重新激活以升级安全记录。",
+                "needs_reactivation": True,
+            }
+        return {"valid": False, "days_left": 0, "error": "License 文件格式无效", "needs_reactivation": False}
+
+    fmt = verify_key_format(record.key)
     if not fmt["valid"]:
-        return {"valid": False, "days_left": 0, "error": fmt["error"]}
+        return {"valid": False, "days_left": 0, "error": fmt["error"], "needs_reactivation": False}
 
-    expected_sig = _make_hmac(key, machine_id, activate_ts)
-    if not hmac.compare_digest(sig, expected_sig):
-        return {"valid": False, "days_left": 0, "error": "License 文件已被篡改"}
+    if record.days <= 0:
+        return {"valid": False, "days_left": 0, "error": "License 有效期无效", "needs_reactivation": False}
 
-    return {"valid": True, "days_left": 0, "error": ""}
+    if record.payload_kind != _PAYLOAD_KIND_PROXY_TOKEN:
+        return {"valid": False, "days_left": 0, "error": "License 载荷类型无效", "needs_reactivation": False}
 
+    expected_sig = _make_hmac_v2(
+        record.key,
+        record.machine_id,
+        record.activate_ts,
+        record.days,
+        record.payload_kind,
+        record.payload_hex,
+    )
+    if not hmac.compare_digest(record.sig, expected_sig):
+        return {"valid": False, "days_left": 0, "error": "License 文件已被篡改", "needs_reactivation": False}
 
-def verify_license_with_days(key: str, machine_id: str, activate_ts: int, days: int, sig: str) -> dict:
-    """
-    Verify a saved license including expiry check.
-    Returns {"valid": bool, "days_left": int, "error": str}
-    """
-    fmt = verify_key_format(key)
-    if not fmt["valid"]:
-        return {"valid": False, "days_left": 0, "error": fmt["error"]}
-
-    expected_sig = _make_hmac(key, machine_id, activate_ts)
-    if not hmac.compare_digest(sig, expected_sig):
-        return {"valid": False, "days_left": 0, "error": "License 文件已被篡改"}
-
-    expire_ts = activate_ts + days * 86400
+    expire_ts = record.activate_ts + record.days * 86400
     remaining = expire_ts - int(time.time())
     if remaining <= 0:
-        return {"valid": False, "days_left": 0, "error": "Key 已过期"}
+        return {"valid": False, "days_left": 0, "error": "Key 已过期", "needs_reactivation": False}
 
-    return {"valid": True, "days_left": remaining // 86400, "error": ""}
-
-
-def make_license_record(key: str, machine_id: str, activate_ts: int, days: int) -> str:
-    """Build the string to write to license.key"""
-    sig = _make_hmac(key, machine_id, activate_ts)
-    return f"{key}|{machine_id}|{activate_ts}|{days}|{sig}"
-
-
-def xor_decrypt(hex_str: str, key_hex: str) -> str:
-    """Decrypt XOR-encrypted API key returned by the Worker."""
-    data = bytes.fromhex(hex_str)
-    key_bytes = bytes.fromhex(key_hex)
-    out = bytes(data[i] ^ key_bytes[i % len(key_bytes)] for i in range(len(data)))
-    return out.decode()
+    return {
+        "valid": True,
+        "days_left": remaining // 86400,
+        "error": "",
+        "needs_reactivation": False,
+    }
 
 
-def get_cloud_api_key() -> str:
-    """Return the cloud API key stored in env (set after activation)."""
-    return os.environ.get("DEEPSEEK_API_KEY", "")
+def _license_file_path(data_dir) -> Path:
+    return Path(data_dir) / "license.key"
+
+
+def read_license_record(data_dir) -> LicenseRecord | None:
+    try:
+        license_file = _license_file_path(data_dir)
+        if not license_file.exists():
+            return None
+        return parse_license_record(license_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _worker_proxy_base_url() -> str:
+    if not WORKER_URL:
+        return ""
+    return f"{WORKER_URL.rstrip('/')}/v1"
+
+
+def get_license_ai_config(data_dir) -> dict | None:
+    """
+    Return the local cloud AI config if a valid v2 license record exists.
+
+    The returned api_key is a license-bound worker session token, not the
+    upstream provider key.
+    """
+    record = read_license_record(data_dir)
+    if not record:
+        return None
+
+    result = verify_license_record(record)
+    if not result["valid"]:
+        return None
+
+    base_url = _worker_proxy_base_url()
+    if not base_url:
+        return None
+
+    try:
+        token = decrypt_local_payload(record.key, record.machine_id, record.payload_hex)
+    except Exception:
+        return None
+
+    return {
+        "mode": "proxy_token",
+        "api_key": token,
+        "base_url": base_url,
+        "days_left": result["days_left"],
+    }
 
 
 def get_license_api_key(data_dir) -> str:
     """
-    Get API key from activated license.
-    Returns empty string if no valid license found.
-    Used by ai/client.py to prioritize license over .env file.
+    Legacy compatibility wrapper.
+
+    The cloud version no longer returns the upstream provider key to clients,
+    so this function intentionally returns an empty string for v2 licenses.
     """
-    from pathlib import Path
-    license_file = Path(data_dir) / "license.key"
-    if not license_file.exists():
-        return ""
+    _ = data_dir
+    return ""
 
+
+def decode_session_token_preview(token: str) -> dict:
+    """
+    Best-effort decode of the signed worker session token payload for debugging.
+    Does not verify the signature.
+    """
     try:
-        content = license_file.read_text(encoding="utf-8").strip()
-        parts = content.split("|")
-
-        # New format with encrypted API key: key|machine_id|activate_ts|days|encrypted_api_key|sig (6 parts)
-        if len(parts) == 6:
-            key, machine_id, activate_ts_str, days_str, encrypted_hex, sig = parts
-            activate_ts = int(activate_ts_str)
-            days = int(days_str)
-
-            # Verify license is valid and not expired
-            result = verify_license_with_days(key, machine_id, activate_ts, days, sig)
-            if not result["valid"]:
-                return ""
-
-            # Decrypt API key
-            import hashlib
-            norm = key.replace("-", "")
-            derived = hashlib.sha256(f"{norm}:{machine_id}:{WORKER_TOKEN}".encode()).hexdigest()
-
-            # XOR decrypt
-            encrypted = bytes.fromhex(encrypted_hex)
-            derived_bytes = bytes.fromhex(derived)
-            decrypted = bytes(encrypted[i] ^ derived_bytes[i % len(derived_bytes)] for i in range(len(encrypted)))
-            api_key = decrypted.decode()
-
-            return api_key
-
-        # Old format without encrypted key - check environment
-        if len(parts) == 5:
-            key, machine_id, activate_ts_str, days_str, sig = parts
-            activate_ts = int(activate_ts_str)
-            days = int(days_str)
-
-            result = verify_license_with_days(key, machine_id, activate_ts, days, sig)
-            if not result["valid"]:
-                return ""
-
-            # Old format: API key might be in environment or .env file
-            return os.environ.get("DEEPSEEK_API_KEY", "")
-
-        return ""
-
+        body, _, _sig = token.partition(".")
+        if not body:
+            return {}
+        padded = body + "=" * (-len(body) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        data = json.loads(decoded)
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return ""
-
+        return {}

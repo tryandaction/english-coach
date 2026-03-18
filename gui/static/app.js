@@ -2,6 +2,7 @@
 
 const pages = {};
 let currentPage = null;
+let currentAbortController = null; // Global abort controller for canceling requests
 
 async function loadPage(name) {
   if (!pages[name]) {
@@ -12,6 +13,29 @@ async function loadPage(name) {
 }
 
 async function navigate(name) {
+  // Cancel any pending requests from previous page
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+  }
+
+  // Create new abort controller for this page
+  currentAbortController = new AbortController();
+  window._currentAbortSignal = currentAbortController.signal;
+
+  // Check version mode and redirect license page in opensource
+  try {
+    const status = await fetch('/api/setup/status').then(r => r.json());
+    if (!status.configured && name !== 'setup') {
+      name = 'setup';
+    }
+    if (name === 'license' && status.version_mode === 'opensource') {
+      name = 'setup'; // Redirect to setup instead
+    }
+  } catch (e) {
+    // If status check fails, continue with original navigation
+  }
+
   const container = document.getElementById('page-container');
   container.innerHTML = '<div style="padding:40px;text-align:center"><div class="spinner"></div></div>';
 
@@ -30,7 +54,16 @@ async function navigate(name) {
   });
 
   try {
-    const mod = await loadPage(name);
+    const mod = await Promise.race([
+      loadPage(name),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Page load timeout')), 5000))
+    ]);
+
+    // Check if navigation was aborted while loading module
+    if (window._currentAbortSignal?.aborted) {
+      return; // Don't render if user already navigated away
+    }
+
     container.innerHTML = '';
     await mod.render(container);
     currentPage = name;
@@ -38,8 +71,11 @@ async function navigate(name) {
     const content = document.getElementById('content');
     if (content) content.scrollTop = 0;
   } catch (e) {
-    container.innerHTML = `<div class="alert alert-error">Failed to load page: ${e.message}</div>`;
-    console.error(e);
+    // Don't show error if request was aborted (user navigated away)
+    if (e.name === 'AbortError') return;
+
+    container.innerHTML = `<div class="alert alert-error">Failed to load page "${name}": ${e.message}<br><small>Try refreshing or check console for details.</small></div>`;
+    console.error('Navigation error:', e);
   }
 }
 
@@ -87,7 +123,9 @@ document.querySelectorAll('#mobile-more-drawer .more-item').forEach(btn => {
 // API helpers
 window.api = {
   async get(path) {
-    const r = await fetch(path);
+    const r = await fetch(path, {
+      signal: window._currentAbortSignal // Support request cancellation
+    });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
       throw new Error(err.detail || `API error ${r.status}`);
@@ -99,6 +137,7 @@ window.api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: window._currentAbortSignal // Support request cancellation
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
@@ -112,6 +151,7 @@ window.api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: window._currentAbortSignal // Support request cancellation
     });
     if (!r.ok) throw new Error(`API error ${r.status}`);
     const reader = r.body.getReader();
@@ -134,6 +174,18 @@ window.api = {
       }
     }
   },
+  // Helper: check if current page navigation was aborted
+  isAborted() {
+    return window._currentAbortSignal?.aborted;
+  },
+  // Helper: check if element is still connected to DOM
+  isConnected(el) {
+    return el && el.isConnected;
+  },
+  // Helper: combined check for abort + DOM connection
+  shouldContinue(el) {
+    return !window._currentAbortSignal?.aborted && (!el || el.isConnected);
+  }
 };
 
 // Global TTS helper — uses edge-tts backend for quality, falls back to Web Speech API
@@ -201,30 +253,59 @@ function hideOverlay() {
   setTimeout(() => overlay.remove(), 450);
 }
 
-// Check setup on load
+// Check setup on load with timeout protection
 async function init() {
   setStartupMsg('Checking configuration…');
   let licStatus = { active: false };
+  let versionMode = 'opensource';
+
+  // Timeout protection: force show UI after 5 seconds no matter what
+  const forceShowTimeout = setTimeout(() => {
+    console.warn('Init timeout - forcing UI display');
+    hideOverlay();
+    navigate('home');
+  }, 5000);
+
   try {
-    const status = await api.get('/api/setup/status');
+    const status = await Promise.race([
+      api.get('/api/setup/status'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+    ]);
+    versionMode = status.version_mode || 'opensource';
+
+    // First-run detection: if not configured, go directly to setup wizard
     if (!status.configured) {
+      clearTimeout(forceShowTimeout);
       hideOverlay();
       navigate('setup');
       return;
     }
-  } catch (e) {}
-  try {
-    licStatus = await api.get('/api/license/status');
-    const licLink = document.querySelector('[data-page="license"]');
-    if (licLink) {
-      const dot = document.createElement('span');
-      dot.className = `nav-status-dot ${licStatus.active ? 'active' : 'inactive'}`;
-      licLink.appendChild(dot);
+  } catch (e) {
+    console.warn('Setup check failed:', e);
+  }
+
+  if (versionMode === 'cloud') {
+    try {
+      licStatus = await Promise.race([
+        api.get('/api/license/status'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+      ]);
+      const licLink = document.querySelector('[data-page="license"]');
+      if (licLink) {
+        const dot = document.createElement('span');
+        dot.className = `nav-status-dot ${licStatus.active ? 'active' : 'inactive'}`;
+        licLink.appendChild(dot);
+      }
+    } catch (e) {
+      console.warn('License check failed:', e);
     }
-  } catch {}
-  // Hide overlay and navigate immediately — don't wait for preload
+  }
+
+  // Clear timeout and show UI
+  clearTimeout(forceShowTimeout);
   hideOverlay();
   navigate('home');
+
   // Defer all background work well after UI is visible
   setTimeout(() => _preloadContent(licStatus), 3000);
   if (licStatus.active) {

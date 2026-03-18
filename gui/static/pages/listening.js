@@ -1,6 +1,7 @@
 // pages/listening.js — Listening comprehension with rich audio player + karaoke transcript
 
 const STORAGE_KEY = 'listening_current';
+const PRACTICE_KEY = 'practice_mode';
 
 const _store = {
   get: () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { return null; } },
@@ -15,10 +16,21 @@ let _answers = {};
 let _info = null;
 let _timestamps = []; // [{index, speaker, text, start_ms, end_ms}]
 let _audioEl = null;  // shared <audio> element reference
+let _activePractice = null;
 
 export async function render(el) {
   const saved = _store.get();
+  const incomingPractice = getPracticeContext();
+
+  if (incomingPractice) {
+    _activePractice = incomingPractice;
+    _store.clear();
+    renderStart(el);
+    return;
+  }
+
   if (saved && saved.session_id) {
+    _activePractice = saved.practice || null;
     _sid = saved.session_id; _qTotal = saved.question_count;
     _qIndex = saved.q_index || 0; _answers = saved.answers || {};
     _info = saved; _timestamps = saved.timestamps || [];
@@ -30,6 +42,8 @@ export async function render(el) {
     }
     return;
   }
+
+  _activePractice = null;
   renderStart(el);
 }
 
@@ -41,30 +55,38 @@ function saveSession() {
 
 // ── Start screen ──────────────────────────────────────────────────────────────
 function renderStart(el) {
+  const preset = getListeningPreset();
+  const startLabel = _activePractice?.source === 'mock_exam' ? '▶ Start Mock Section' : '▶ Start Listening';
+
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
       <h1 style="margin:0">🎧 Listening Practice</h1>
     </div>
-    <p style="margin-bottom:16px;color:var(--text-dim)">Simulates real exam listening conditions. Audio plays up to 3 times, transcript revealed after completion.</p>
+    <p style="margin-bottom:16px;color:var(--text-dim)">
+      ${_activePractice
+        ? `${escHtml((preset.exam || 'general').toUpperCase())} ${_activePractice.source === 'mock_exam' ? '模考分节' : '专项训练'}已预选`
+        : 'Simulates real exam listening conditions. Audio plays up to 3 times, transcript revealed after completion.'}
+    </p>
+    ${practiceBannerHtml()}
     <div class="card" style="margin-bottom:16px;padding:16px">
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
         <div>
           <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px">EXAM</label>
           <div id="exam-tabs" style="display:flex;gap:6px;flex-wrap:wrap">
             ${['general','toefl','ielts','cet','gre'].map((e,i) =>
-              `<button class="btn ${i===0?'btn-primary':'btn-outline'} exam-tab" data-exam="${e}" style="font-size:13px;padding:5px 12px">${e.toUpperCase()}</button>`
+              `<button class="btn ${e===preset.exam?'btn-primary':'btn-outline'} exam-tab" data-exam="${e}" style="font-size:13px;padding:5px 12px">${e.toUpperCase()}</button>`
             ).join('')}
           </div>
         </div>
         <div>
           <label style="font-size:12px;color:var(--text-dim);display:block;margin-bottom:6px">TYPE</label>
           <div id="type-tabs" style="display:flex;gap:6px">
-            <button class="btn btn-primary type-tab" data-type="conversation" style="font-size:13px;padding:5px 12px">Conversation</button>
-            <button class="btn btn-outline type-tab" data-type="monologue" style="font-size:13px;padding:5px 12px">Lecture / Talk</button>
+            <button class="btn ${preset.dtype === 'conversation' ? 'btn-primary' : 'btn-outline'} type-tab" data-type="conversation" style="font-size:13px;padding:5px 12px">Conversation</button>
+            <button class="btn ${preset.dtype === 'monologue' ? 'btn-primary' : 'btn-outline'} type-tab" data-type="monologue" style="font-size:13px;padding:5px 12px">Lecture / Talk</button>
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:6px">
-          <button class="btn btn-success" id="btn-begin" style="padding:8px 24px;font-size:14px">▶ Start Listening</button>
+          <button class="btn btn-success" id="btn-begin" style="padding:8px 24px;font-size:14px">${startLabel}</button>
           <div id="pool-status" style="font-size:11px;color:var(--text-dim);text-align:center"></div>
         </div>
       </div>
@@ -73,15 +95,17 @@ function renderStart(el) {
   `;
   el.querySelectorAll('.exam-tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      el.querySelectorAll('.exam-tab').forEach(b => b.classList.remove('btn-primary'));
-      btn.classList.add('btn-primary');
+      el.querySelectorAll('.exam-tab').forEach(b => {
+        b.className = `btn ${b === btn ? 'btn-primary' : 'btn-outline'} exam-tab`;
+      });
       updatePoolStatus(el);
     });
   });
   el.querySelectorAll('.type-tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      el.querySelectorAll('.type-tab').forEach(b => b.classList.remove('btn-primary'));
-      btn.classList.add('btn-primary');
+      el.querySelectorAll('.type-tab').forEach(b => {
+        b.className = `btn ${b === btn ? 'btn-primary' : 'btn-outline'} type-tab`;
+      });
       updatePoolStatus(el);
     });
   });
@@ -94,6 +118,12 @@ async function updatePoolStatus(el) {
   if (!statusEl) return;
   try {
     const r = await api.get('/api/listening/pool/status');
+
+    // Check if navigation was aborted while waiting
+    if (window._currentAbortSignal?.aborted || !el.isConnected) {
+      return; // User navigated away
+    }
+
     const examBtn = el.querySelector('.exam-tab.btn-primary');
     const typeBtn = el.querySelector('.type-tab.btn-primary');
     const exam  = examBtn ? examBtn.dataset.exam  : 'general';
@@ -105,7 +135,11 @@ async function updatePoolStatus(el) {
     } else {
       statusEl.innerHTML = `<span style="color:var(--yellow)">⏳ Preparing…</span>`;
     }
-  } catch { statusEl.innerHTML = ''; }
+  } catch (e) {
+    // Don't show error if request was aborted
+    if (e.name === 'AbortError' || !el.isConnected) return;
+    statusEl.innerHTML = '';
+  }
 }
 
 // ── Session start ─────────────────────────────────────────────────────────────
@@ -121,12 +155,21 @@ async function startSession(el) {
 
   try {
     const r = await api.post(`/api/listening/start?exam=${exam}&dialogue_type=${dtype}`, {});
+
+    // Check if navigation was aborted while waiting for response
+    if (window._currentAbortSignal?.aborted || !el.isConnected) {
+      return; // User navigated away, don't render
+    }
+
     _sid = r.session_id; _qTotal = r.question_count;
-    _qIndex = 0; _answers = {}; _info = r;
+    _qIndex = 0; _answers = {}; _info = { ...r, practice: _activePractice };
     _timestamps = r.timestamps || [];
     saveSession();
     renderShell(el, r);
   } catch (e) {
+    // Don't show error if request was aborted (user navigated away)
+    if (e.name === 'AbortError' || !el.isConnected) return;
+
     if (btnBegin) { btnBegin.disabled = false; btnBegin.textContent = '▶ Start Listening'; }
     const body = el.querySelector('#listening-body') || el;
     const errDiv = document.createElement('div');
@@ -148,6 +191,7 @@ function renderShell(el, info) {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <h1 style="margin:0">🎧 Listening Practice</h1>
       <div style="display:flex;gap:8px;align-items:center">
+        ${practiceTagHtml()}
         <span class="tag">${examLabel}</span>
         <span class="tag">${info.difficulty || 'B1'}</span>
         <span class="tag" style="color:var(--text-dim)">${typeLabel}</span>
@@ -363,8 +407,17 @@ async function loadQuestion(el) {
   qaArea.innerHTML = '<div style="text-align:center;padding:20px"><div class="spinner"></div></div>';
   try {
     const q = await api.get(`/api/listening/question/${_sid}/${_qIndex}`);
+
+    // Check if navigation was aborted while waiting
+    if (window._currentAbortSignal?.aborted || !el.isConnected) {
+      return; // User navigated away
+    }
+
     renderQuestion(el, q);
   } catch (e) {
+    // Don't show error if request was aborted
+    if (e.name === 'AbortError' || !el.isConnected) return;
+
     qaArea.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
@@ -419,6 +472,12 @@ async function submitAnswer(el, q, letter) {
   const btnNext  = el.querySelector('#btn-next-q');
   try {
     const r = await api.post(`/api/listening/answer/${_sid}`, { question_index: q.index, answer: letter });
+
+    // Check if navigation was aborted while waiting
+    if (window._currentAbortSignal?.aborted || !el.isConnected) {
+      return; // User navigated away
+    }
+
     _answers[q.index] = r; saveSession();
     el.querySelectorAll('.choice-btn').forEach(btn => {
       if (btn.dataset.letter === r.correct_answer) btn.classList.add('correct');
@@ -435,6 +494,9 @@ async function submitAnswer(el, q, letter) {
       else { _qIndex++; saveSession(); loadQuestion(el); }
     });
   } catch (e) {
+    // Don't show error if request was aborted
+    if (e.name === 'AbortError' || !el.isConnected) return;
+
     feedback.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
@@ -445,22 +507,32 @@ async function showResults(el) {
   const correct = Object.values(_answers).filter(a => a.correct).length;
   const pct = Math.round((correct / _qTotal) * 100);
   const color = pct >= 80 ? 'var(--green)' : pct >= 60 ? 'var(--yellow)' : 'var(--red)';
+  const recommendation = listeningRecommendation(pct, correct, _qTotal);
 
   qaArea.innerHTML = `
     <div class="card" style="text-align:center;padding:32px">
       <div style="font-size:40px;margin-bottom:12px">${pct>=80?'🎉':pct>=60?'👍':'💪'}</div>
       <h2 style="margin-bottom:8px">Listening Complete</h2>
+      ${_activePractice ? `<p style="color:var(--text-dim);margin-top:-4px">${escHtml(practiceSummaryText())}</p>` : ''}
       <div style="font-size:36px;font-weight:700;color:${color};margin:12px 0">${pct}%</div>
       <p style="color:var(--text-dim)">${correct} / ${_qTotal} correct</p>
+      <div class="card" style="margin:18px auto 0;max-width:560px;text-align:left;background:var(--bg2);padding:16px">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">结果解读</div>
+        <div style="font-size:14px;line-height:1.7">${escHtml(recommendation)}</div>
+      </div>
       <div style="display:flex;gap:10px;justify-content:center;margin-top:20px;flex-wrap:wrap">
         <button class="btn btn-outline" id="btn-transcript">📄 Show Transcript</button>
-        <button class="btn btn-primary" id="btn-new-listen">New Listening ↺</button>
+        <button class="btn btn-primary" id="btn-new-listen">${_activePractice ? 'Another Drill ↺' : 'New Listening ↺'}</button>
+        ${isMockSection() ? '<button class="btn btn-outline" id="btn-complete-listening-mock">Complete Mock Section</button>' : ''}
       </div>
       <div id="transcript-area" style="margin-top:16px;text-align:left"></div>
     </div>
   `;
 
   qaArea.querySelector('#btn-new-listen').addEventListener('click', () => { _store.clear(); renderStart(el); });
+  qaArea.querySelector('#btn-complete-listening-mock')?.addEventListener('click', async () => {
+    await completeMockSection(correct, _qTotal);
+  });
   qaArea.querySelector('#btn-transcript').addEventListener('click', async () => {
     const area = qaArea.querySelector('#transcript-area');
     if (area.innerHTML) { area.innerHTML = ''; return; }
@@ -515,4 +587,103 @@ async function showResults(el) {
       area.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
     }
   });
+}
+
+function getPracticeContext() {
+  try {
+    const raw = sessionStorage.getItem(PRACTICE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.section !== 'listening') return null;
+    if (parsed.started_at && Date.now() - parsed.started_at > 30 * 60 * 1000) {
+      sessionStorage.removeItem(PRACTICE_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getListeningPreset() {
+  const practice = _activePractice || {};
+  const exam = ['general', 'toefl', 'ielts', 'cet', 'gre'].includes(practice.exam) ? practice.exam : 'general';
+  return {
+    exam,
+    dtype: mapListeningType(practice.type),
+  };
+}
+
+function mapListeningType(type) {
+  return ['organization', 'lecture', 'talk', 'monologue'].includes(type) ? 'monologue' : 'conversation';
+}
+
+function practiceBannerHtml() {
+  if (!_activePractice) return '';
+  return `
+    <div class="card" style="margin-bottom:16px;padding:14px 16px;border-color:var(--accent);background:var(--bg2)">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--accent);margin-bottom:6px">
+        ${_activePractice.source === 'mock_exam' ? 'MOCK EXAM' : 'PRACTICE MODE'}
+      </div>
+      <div style="font-size:14px">
+        ${escHtml(practiceSummaryText())}
+      </div>
+    </div>
+  `;
+}
+
+function practiceTagHtml() {
+  if (!_activePractice) return '';
+  return `<span class="tag" style="border-color:var(--accent);color:var(--accent)">${escHtml(practiceSummaryText())}</span>`;
+}
+
+function practiceSummaryText() {
+  if (!_activePractice) return '';
+  const exam = (_activePractice.exam || 'general').toUpperCase();
+  const label = _activePractice.source === 'mock_exam' ? 'Mock Section' : 'Drill';
+  const type = _activePractice.type ? ` · ${typeLabel(_activePractice.type)}` : '';
+  return `${exam} ${label}${type}`;
+}
+
+function isMockSection() {
+  return _activePractice?.source === 'mock_exam' && _activePractice?.mock_session_id;
+}
+
+async function completeMockSection(correct, total) {
+  if (!isMockSection()) return;
+  await api.post(`/api/mock-exam/complete-section/${_activePractice.mock_session_id}`, {
+    section_index: _activePractice.mock_section_index,
+    result: {
+      correct,
+      total,
+      source: 'listening',
+    },
+  });
+  navigate('mock-exam');
+}
+
+function typeLabel(type) {
+  return {
+    detail: 'Detail',
+    inference: 'Inference',
+    organization: 'Organization',
+    attitude: 'Attitude',
+    multiple_choice: 'Multiple Choice',
+    form_completion: 'Form Completion',
+    matching: 'Matching',
+  }[type] || String(type || '').replace(/_/g, ' ');
+}
+
+function listeningRecommendation(pct, correct, total) {
+  if (pct >= 85) {
+    return '这轮听力表现稳定，建议继续做同考试下更高难度或更长材料，保持对结构与细节的双重把握。';
+  }
+  if (pct >= 60) {
+    return `这轮已经具备基本稳定性，但还有 ${Math.max(total - correct, 0)} 题失分。建议看完 transcript 后再做一轮同类型材料，重点复盘漏听和误判。`;
+  }
+  return '这轮失分偏多，建议先降低难度或改做更短的对话/讲座，再逐步提升长度与速度。先把听懂主线建立起来。';
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

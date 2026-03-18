@@ -19,6 +19,7 @@ import frontmatter
 class ContentType(str, Enum):
     VOCAB = "vocab"
     READING = "reading"
+    LISTENING = "listening"
     WRITING = "writing"
     SPEAKING = "speaking"
     GRAMMAR = "grammar"
@@ -41,6 +42,7 @@ STEM_TERMS = {
 _TYPE_HINTS: dict[ContentType, list[str]] = {
     ContentType.VOCAB: ["vocabulary", "vocab", "words", "glossary", "terms"],
     ContentType.READING: ["reading", "passage", "article", "text"],
+    ContentType.LISTENING: ["listening", "lecture", "dialogue", "conversation", "audio"],
     ContentType.WRITING: ["writing", "essay", "composition", "awa", "task2"],
     ContentType.SPEAKING: ["speaking", "task1", "task2", "task3", "task4", "oral"],
     ContentType.GRAMMAR: ["grammar", "syntax", "tense", "article", "preposition"],

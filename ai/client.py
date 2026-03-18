@@ -1,7 +1,8 @@
 """
 AI client — multi-backend wrapper with local response cache.
 Supports: Anthropic Claude, DeepSeek, Alibaba Qwen (and any OpenAI-compatible API).
-Users supply their own API key via .env, config.yaml, or environment variables.
+Users can supply their own API key, or use a cloud license that proxies requests
+through the activation backend without exposing the upstream provider key.
 """
 
 from __future__ import annotations
@@ -13,6 +14,28 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+# Import TOEFL 2026 question generators
+from ai.question_generators import (
+    generate_complete_words_question,
+    generate_daily_life_question,
+    generate_listen_repeat_task,
+    generate_virtual_interview_task,
+    generate_build_sentence_task,
+    generate_write_email_task,
+    generate_academic_discussion_task,
+)
+
+# Import additional reading question generators
+from ai.reading_question_generators import (
+    generate_negative_factual_question,
+    generate_rhetorical_purpose_question,
+    generate_reference_question,
+    generate_sentence_simplification_question,
+    generate_insert_text_question,
+    generate_prose_summary_question,
+    generate_fill_table_question,
+)
 
 
 SYSTEM_PROMPT = """You are an expert English teacher specializing in academic English for Chinese STEM students preparing for TOEFL, GRE, IELTS, CET-4/6, or general academic use.
@@ -154,13 +177,27 @@ class AIClient:
             import json as _j
             return _j.loads(cached)
 
-        word_targets = {"A1": 80, "A2": 120, "B1": 180, "B2": 250, "C1": 320, "C2": 400}
-        words = word_targets.get(cefr_level, 200)
+        default_targets = {"A1": 80, "A2": 120, "B1": 180, "B2": 250, "C1": 320, "C2": 400}
+        exam_targets = {
+            "toefl": {"A1": 120, "A2": 180, "B1": 320, "B2": 680, "C1": 720, "C2": 760},
+            "ielts": {"A1": 120, "A2": 180, "B1": 420, "B2": 820, "C1": 860, "C2": 900},
+            "gre": {"A1": 120, "A2": 180, "B1": 260, "B2": 340, "C1": 430, "C2": 500},
+            "cet": {"A1": 120, "A2": 160, "B1": 240, "B2": 320, "C1": 380, "C2": 420},
+        }
+        words = exam_targets.get(exam, default_targets).get(cefr_level, default_targets.get(cefr_level, 200))
+        style_hint = {
+            "toefl": "Use an academic expository style similar to a TOEFL reading passage, with 6-8 coherent paragraphs and clear development of ideas.",
+            "ielts": "Use an IELTS Academic reading style with substantial detail, 6-8 coherent paragraphs, and a neutral informative tone.",
+            "gre": "Use a dense academic style similar to GRE reading passages, with nuanced reasoning and compact paragraph structure.",
+            "cet": "Use a Chinese university English exam style passage with clear structure and practical academic vocabulary.",
+            "general": "Use a polished academic English article style with clear paragraph transitions.",
+        }.get(exam, "Use a polished academic English article style with clear paragraph transitions.")
 
         prompt = (
-            f"Write a {words}-word reading passage about '{topic}' for a {cefr_level} English learner "
-            f"preparing for {exam.upper()}. Use vocabulary and sentence complexity appropriate for {cefr_level}. "
-            f"Write only the passage text, no title, no questions."
+            f"Write one reading passage about '{topic}' for a {cefr_level} English learner "
+            f"preparing for {exam.upper()}. Target length: about {words} words. "
+            f"{style_hint} Use vocabulary and sentence complexity appropriate for {cefr_level}. "
+            f"Do not add a title, bullets, questions, markdown, or explanations. Return only the passage text."
         )
         passage = self._call(prompt, model=self._default_model, max_tokens=600).strip()
 
@@ -175,14 +212,17 @@ class AIClient:
         cefr_level: str,
         num_questions: int = 5,
         exam: str = "general",
+        question_type: Optional[str] = None,
     ) -> list[dict]:
         """
         Generate reading comprehension questions matching official exam formats.
         TOEFL/CET/general: 4-option MC. IELTS: MC + T/F/NG. GRE: 5-option MC.
         Cached 30 days — same passage won't cost twice.
         Returns list of {question, type, options, answer, explanation}.
+
+        If question_type is specified, generates only that specific type (e.g., "complete_words", "daily_life").
         """
-        cache_key = self._key(f"compq2|{passage[:120]}|{cefr_level}|{exam}|{num_questions}")
+        cache_key = self._key(f"compq2|{passage[:120]}|{cefr_level}|{exam}|{num_questions}|{question_type or 'mixed'}")
         cached = self._get_cache(cache_key)
         if cached:
             return json.loads(cached)
@@ -246,6 +286,70 @@ class AIClient:
         if result:
             self._set_cache(cache_key, json.dumps(result, ensure_ascii=False), ttl_days=30)
         return result
+
+    # ------------------------------------------------------------------
+    # TOEFL 2026 New Question Types
+    # ------------------------------------------------------------------
+
+    def generate_complete_words_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 2026 'Complete the Words' question."""
+        return generate_complete_words_question(passage, cefr_level, self)
+
+    def generate_daily_life_question(self, cefr_level: str, text_type: str = "email") -> dict:
+        """Generate TOEFL 2026 'Read in Daily Life' question."""
+        return generate_daily_life_question(cefr_level, self, text_type)
+
+    def generate_listen_repeat_task(self, cefr_level: str, num_sentences: int = 7) -> dict:
+        """Generate TOEFL 2026 'Listen & Repeat' speaking task."""
+        return generate_listen_repeat_task(cefr_level, self, num_sentences)
+
+    def generate_virtual_interview_task(self, cefr_level: str, num_questions: int = 5) -> dict:
+        """Generate TOEFL 2026 'Virtual Interview' speaking task."""
+        return generate_virtual_interview_task(cefr_level, self, num_questions)
+
+    def generate_build_sentence_task(self, cefr_level: str, num_items: int = 5) -> dict:
+        """Generate TOEFL 2026 'Build a Sentence' writing task."""
+        return generate_build_sentence_task(cefr_level, self, num_items)
+
+    def generate_write_email_task(self, cefr_level: str) -> dict:
+        """Generate TOEFL 2026 'Write an Email' writing task."""
+        return generate_write_email_task(cefr_level, self)
+
+    def generate_academic_discussion_task(self, cefr_level: str) -> dict:
+        """Generate TOEFL 2026 'Academic Discussion' writing task."""
+        return generate_academic_discussion_task(cefr_level, self)
+
+    # ------------------------------------------------------------------
+    # Additional TOEFL Reading Question Types
+    # ------------------------------------------------------------------
+
+    def generate_negative_factual_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Negative Factual Information' question."""
+        return generate_negative_factual_question(passage, cefr_level, self)
+
+    def generate_rhetorical_purpose_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Rhetorical Purpose' question."""
+        return generate_rhetorical_purpose_question(passage, cefr_level, self)
+
+    def generate_reference_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Reference' question."""
+        return generate_reference_question(passage, cefr_level, self)
+
+    def generate_sentence_simplification_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Sentence Simplification' question."""
+        return generate_sentence_simplification_question(passage, cefr_level, self)
+
+    def generate_insert_text_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Insert Text' question."""
+        return generate_insert_text_question(passage, cefr_level, self)
+
+    def generate_prose_summary_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Prose Summary' question."""
+        return generate_prose_summary_question(passage, cefr_level, self)
+
+    def generate_fill_table_question(self, passage: str, cefr_level: str) -> dict:
+        """Generate TOEFL 'Fill in a Table' question."""
+        return generate_fill_table_question(passage, cefr_level, self)
 
     def evaluate_writing(
         self,
@@ -364,10 +468,12 @@ class AIClient:
         cefr_level: str,
         exam: str = "general",
         dialogue_type: str = "conversation",
+        question_types: Optional[list[str]] = None,
     ) -> dict:
         """
         Generate a listening comprehension script with questions.
         dialogue_type: 'conversation' (two speakers) or 'monologue' (one speaker).
+        question_types: Optional list of specific question types to generate (e.g., ['gist_content', 'detail', 'function'])
         Cached 7 days per cefr+exam+type combo.
         Returns {type, topic, script:[{speaker,text}], questions:[{question,options,answer,explanation}]}.
         """
@@ -381,7 +487,7 @@ class AIClient:
         }
         topic = random.choice(_topics.get(exam, _topics["general"]))
 
-        cache_key = self._key(f"listening|{cefr_level}|{exam}|{dialogue_type}|{topic}")
+        cache_key = self._key(f"listening|{cefr_level}|{exam}|{dialogue_type}|{topic}|{','.join(question_types or [])}")
         cached = self._get_cache(cache_key)
         if cached:
             return json.loads(cached)
@@ -398,14 +504,34 @@ class AIClient:
             )
 
         # Exam-specific question format instructions
-        _q_fmt = {
-            "toefl": (
-                "Write exactly 5 TOEFL Listening questions. "
-                "Include: gist-content (What is the main topic?), detail, function (Why does the speaker say...?), "
-                "attitude (What is the speaker's attitude toward...?), and inference. "
+        if exam == "toefl" and question_types:
+            # Generate specific TOEFL question types
+            type_descriptions = {
+                "gist_content": "gist-content (What is the main topic?)",
+                "gist_purpose": "gist-purpose (Why does the student visit the professor?)",
+                "detail": "detail (According to the professor, what is X?)",
+                "function": "function (Why does the speaker say this: [specific quote]?)",
+                "attitude": "attitude (What is the speaker's attitude toward X?)",
+                "organization": "organization (How does the professor organize the information?)",
+                "connecting": "connecting content (What is the relationship between X and Y?)",
+                "inference": "inference (What can be inferred about X?)",
+            }
+            type_list = ", ".join([type_descriptions.get(qt, qt) for qt in question_types])
+            q_fmt = (
+                f"Write exactly {len(question_types)} TOEFL Listening questions. "
+                f"Include these types: {type_list}. "
                 "Each has 4 options (A/B/C/D). "
-                'questions format: [{"question":"...","type":"gist|detail|function|attitude|inference","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"..."}]'
-            ),
+                'questions format: [{"question":"...","type":"gist_content|gist_purpose|detail|function|attitude|organization|connecting|inference","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"..."}]'
+            )
+        else:
+            _q_fmt = {
+                "toefl": (
+                    "Write exactly 5 TOEFL Listening questions. "
+                    "Include: gist-content (What is the main topic?), detail, function (Why does the speaker say...?), "
+                    "attitude (What is the speaker's attitude toward...?), and inference. "
+                    "Each has 4 options (A/B/C/D). "
+                    'questions format: [{"question":"...","type":"gist_content|detail|function|attitude|inference","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"..."}]'
+                ),
             "ielts": (
                 "Write exactly 5 IELTS Listening questions using mixed formats. "
                 "Include at least 2 multiple-choice (4 options A/B/C/D) and at least 2 form/note completion (fill-in-blank, answer is 1-3 words from the audio). "
@@ -428,8 +554,8 @@ class AIClient:
                 "Each has 4 options (A/B/C/D). "
                 'questions format: [{"question":"...","type":"detail|inference|main_idea","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"..."}]'
             ),
-        }
-        q_fmt = _q_fmt.get(exam, _q_fmt["general"])
+            }
+            q_fmt = _q_fmt.get(exam, _q_fmt["general"])
 
         prompt = (
             f"Create a listening comprehension exercise for a {cefr_level} English learner targeting {exam.upper()}.\n"
@@ -622,22 +748,22 @@ _WRITING_RUBRICS = {
 
 def load_client(config: dict, data_dir: Path) -> Optional["AIClient"]:
     """
-    Load AIClient from License (cloud version) or .env file (opensource version).
+    Load AIClient from cloud license proxy config or local .env settings.
     Priority: License activation > .env file
     Returns None if no API key found.
     """
-    # 1. Check License activation first (cloud version)
+    # 1. Check cloud license first
     try:
-        from gui.license import get_license_api_key
-        license_key = get_license_api_key(data_dir)
-        if license_key:
-            # Cloud version: use DeepSeek with license key
+        from gui.license import get_license_ai_config
+
+        license_cfg = get_license_ai_config(data_dir)
+        if license_cfg:
             return AIClient(
-                api_key=license_key,
+                api_key=license_cfg["api_key"],
                 cache_db_path=data_dir / "ai_cache.db",
                 default_model="deepseek-chat",
                 writing_model="deepseek-chat",
-                base_url="https://api.deepseek.com/v1",
+                base_url=license_cfg["base_url"],
             )
     except Exception:
         pass  # License not available or not activated

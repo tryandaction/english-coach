@@ -18,6 +18,7 @@ from rich.prompt import Prompt, Confirm
 from rich import box
 
 from cli.display import print_header
+from utils.paths import get_content_dir
 
 console = Console()
 
@@ -25,7 +26,7 @@ console = Console()
 _SUPPORTED_EXTS = {".md", ".txt", ".pdf", ".docx"}
 
 # Built-in pack registry — lightweight JSON index bundled with the app
-_REGISTRY_FILE = Path(__file__).parent.parent / "content" / "pack_registry.json"
+_REGISTRY_FILE = get_content_dir() / "pack_registry.json"
 
 
 def run_packs_manager(

@@ -8,6 +8,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0f1117">
   <title>English Coach</title>
+  <link rel="icon" href='data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"%3E%3Ctext x="50%25" y="54%25" dominant-baseline="middle" text-anchor="middle" font-size="48"%3E%F0%9F%93%9A%3C/text%3E%3C/svg%3E'>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -29,10 +30,13 @@
     </div>
     <ul class="nav-links">
       <li><a href="#home"      class="nav-link active" data-page="home">🏠 Home</a></li>
+      <li><a href="#practice"  class="nav-link" data-page="practice">🎯 Practice</a></li>
+      <li><a href="#mock-exam" class="nav-link" data-page="mock-exam">⏱ Mock Exam</a></li>
       <li><a href="#vocab"     class="nav-link" data-page="vocab">🃏 Vocab</a></li>
       <li><a href="#grammar"   class="nav-link" data-page="grammar">✏️ Grammar</a></li>
       <li><a href="#reading"   class="nav-link" data-page="reading">📖 Reading</a></li>
       <li><a href="#listening" class="nav-link" data-page="listening">🎧 Listening</a></li>
+      <li><a href="#speaking"  class="nav-link" data-page="speaking">🗣 Speaking</a></li>
       <li><a href="#writing"   class="nav-link" data-page="writing">📝 Writing</a></li>
       <li><a href="#chat"      class="nav-link" data-page="chat">💬 Chat</a></li>
       <li><a href="#progress"  class="nav-link" data-page="progress">📊 Progress</a></li>
@@ -76,9 +80,12 @@
   <div id="mobile-more-drawer">
     <div style="font-size:11px;color:var(--text-dim);margin-bottom:12px;font-weight:600;letter-spacing:.5px">MORE</div>
     <div class="more-grid">
+      <button class="more-item" data-page="practice"><span class="more-icon">🎯</span>Practice</button>
+      <button class="more-item" data-page="mock-exam"><span class="more-icon">⏱</span>Mock Exam</button>
       <button class="more-item" data-page="grammar"><span class="more-icon">✏️</span>Grammar</button>
       <button class="more-item" data-page="reading"><span class="more-icon">📖</span>Reading</button>
       <button class="more-item" data-page="writing"><span class="more-icon">📝</span>Writing</button>
+      <button class="more-item" data-page="speaking"><span class="more-icon">🗣</span>Speaking</button>
       <button class="more-item" data-page="progress"><span class="more-icon">📊</span>Progress</button>
       <button class="more-item" data-page="history"><span class="more-icon">📋</span>History</button>
       <button class="more-item" data-page="license"><span class="more-icon">🔑</span>License</button>
