@@ -1,4 +1,4 @@
-// pages/mock-exam.js — Mock exam launcher with section progression
+// pages/mock-exam.js — Mock exam launcher with coach recommendation
 
 const MOCK_STATE_KEY = 'mock_exam_state';
 const PRACTICE_KEY = 'practice_mode';
@@ -17,21 +17,29 @@ export async function render(el) {
     await refreshSession(el, saved.session_id);
     return;
   }
-  renderLauncher(el);
+  const coach = await api.get('/api/coach/status').catch(() => ({}));
+  renderLauncher(el, coach);
 }
 
-function renderLauncher(el) {
+function renderLauncher(el, coach) {
+  const coachTask = ((coach.plan || {}).tasks || []).find(task => task.route_page === 'mock-exam');
+  const contextTask = getCoachTaskContext();
+  const activeTask = coachTask || contextTask;
+  const preferredExam = activeTask?.exam || 'toefl';
+  const preferredSection = activeTask?.recommended_section || null;
   el.innerHTML = `
     <h1>⏱ Mock Exam</h1>
     <p style="color:var(--text-dim)">启动一套连续 section 流的模考会话。当前版本会记录每个 section 的状态、继续进度和完成态。</p>
+
+    ${renderCoachHint(coachTask || contextTask, coach)}
 
     <div class="card" style="padding:20px;margin-bottom:18px">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
         <div>
           <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:10px">EXAM</div>
           <div id="mock-exam-tabs" style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-primary mock-exam-tab" data-exam="toefl">TOEFL</button>
-            <button class="btn btn-outline mock-exam-tab" data-exam="ielts">IELTS</button>
+            <button class="btn ${preferredExam === 'toefl' ? 'btn-primary' : 'btn-outline'} mock-exam-tab" data-exam="toefl">TOEFL</button>
+            <button class="btn ${preferredExam === 'ielts' ? 'btn-primary' : 'btn-outline'} mock-exam-tab" data-exam="ielts">IELTS</button>
           </div>
         </div>
         <div>
@@ -39,7 +47,7 @@ function renderLauncher(el) {
           <div style="display:grid;grid-template-columns:repeat(2,minmax(120px,1fr));gap:10px">
             ${['reading', 'listening', 'speaking', 'writing'].map((section, index) => `
               <label class="card" style="padding:12px;display:flex;gap:10px;align-items:center;cursor:pointer">
-                <input type="checkbox" class="mock-section" value="${section}" ${index < 2 ? 'checked' : ''}>
+                <input type="checkbox" class="mock-section" value="${section}" ${(preferredSection ? preferredSection === section : index < 2) ? 'checked' : ''}>
                 <span style="text-transform:capitalize">${section}</span>
               </label>
             `).join('')}
@@ -48,7 +56,7 @@ function renderLauncher(el) {
       </div>
 
       <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
-        <button class="btn btn-primary" id="btn-start-mock">Start Mock Exam</button>
+        <button class="btn btn-primary" id="btn-start-mock">${preferredSection ? 'Start Recommended Section' : 'Start Mock Exam'}</button>
         <button class="btn btn-outline" id="btn-go-practice">Go To Practice Mode</button>
       </div>
     </div>
@@ -65,7 +73,7 @@ function renderLauncher(el) {
     </div>
   `;
 
-  let activeExam = 'toefl';
+  let activeExam = preferredExam;
   el.querySelectorAll('.mock-exam-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       activeExam = btn.dataset.exam;
@@ -79,11 +87,9 @@ function renderLauncher(el) {
   el.querySelector('#btn-start-mock')?.addEventListener('click', async () => {
     const sections = Array.from(el.querySelectorAll('.mock-section:checked')).map(node => node.value);
     if (!sections.length) return;
-
     const btn = el.querySelector('#btn-start-mock');
     btn.disabled = true;
     btn.textContent = 'Starting...';
-
     try {
       const session = await api.post('/api/mock-exam/start', { exam: activeExam, sections });
       _mockStore.set(session);
@@ -100,10 +106,33 @@ function renderLauncher(el) {
   });
 }
 
+function renderCoachHint(task, coach) {
+  if (task) {
+    return `
+      <div class="card" style="padding:16px;margin-bottom:18px;border-color:var(--accent)">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <span class="tag">${task.category === 'sprint' ? '冲刺内容' : 'Coach 推荐'}</span>
+          <span class="tag">${task.state === 'done' ? '已完成' : '待执行'}</span>
+        </div>
+        <div style="font-size:14px;font-weight:600;margin-bottom:6px">${escHtml(task.title || '今天建议做 1 个 mock section')}</div>
+        <div style="font-size:13px;color:var(--text-dim);line-height:1.6">${escHtml(task.reason || task.description || '')}</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="card" style="padding:16px;margin-bottom:18px;background:var(--bg2)">
+      <div style="font-size:13px;color:var(--text-dim);line-height:1.7">
+        ${coach.stage === 'sprint'
+          ? '你当前处于冲刺阶段，但今天的计划没有优先推荐 mock，建议先回去完成更高优先级的修复任务。'
+          : '今天没有把 Mock Exam 作为主任务推荐。更适合先做轻量任务，等进入冲刺阶段再提高 mock 权重。'}
+      </div>
+    </div>
+  `;
+}
+
 function renderSessionView(el, session) {
   if (_timerId) clearInterval(_timerId);
   _mockStore.set(session);
-
   if (session.exam_complete) {
     renderCompletedView(el, session);
     return;
@@ -146,9 +175,7 @@ function renderSessionView(el, session) {
             <div style="font-size:13px;color:var(--text-dim)">Time Limit: ${section.time_limit} min</div>
             <div style="font-size:13px;color:var(--text-dim)">Items: ${section.item_count || 0}</div>
             ${section.summary ? renderSectionSummary(section.summary) : ''}
-            <div style="margin-top:12px">
-              ${renderSectionAction(section, index)}
-            </div>
+            <div style="margin-top:12px">${renderSectionAction(section, index)}</div>
           </div>
         `).join('')}
       </div>
@@ -159,15 +186,11 @@ function renderSessionView(el, session) {
   el.querySelector('#btn-reset-mock')?.addEventListener('click', () => {
     _mockStore.clear();
     if (_timerId) clearInterval(_timerId);
-    renderLauncher(el);
+    render(el);
   });
-
   el.querySelectorAll('[data-open-section]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      openSection(session, btn.dataset.openSection, Number(btn.dataset.index));
-    });
+    btn.addEventListener('click', () => openSection(session, btn.dataset.openSection, Number(btn.dataset.index)));
   });
-
   _timerId = setInterval(() => refreshSession(el, session.session_id), 5000);
 }
 
@@ -195,12 +218,11 @@ function renderCompletedView(el, session) {
           </div>
         `).join('') || '<div class="alert alert-info">当前还没有可展示的 section 评分明细。</div>'}
       </div>
-      ${(report.recommendations || []).length
-        ? `<div class="card" style="padding:16px;text-align:left;background:var(--bg2)">
-            <strong style="display:block;margin-bottom:8px">Recommendations</strong>
-            ${(report.recommendations || []).map(item => `<div style="font-size:13px;color:var(--text-dim);margin-bottom:6px">• ${escHtml(item)}</div>`).join('')}
-          </div>`
-        : ''}
+      ${(report.recommendations || []).length ? `
+        <div class="card" style="padding:16px;text-align:left;background:var(--bg2)">
+          <strong style="display:block;margin-bottom:8px">Recommendations</strong>
+          ${(report.recommendations || []).map(item => `<div style="font-size:13px;color:var(--text-dim);margin-bottom:6px">• ${escHtml(item)}</div>`).join('')}
+        </div>` : ''}
       <div class="card" style="padding:16px;text-align:left;background:var(--bg2);margin-top:14px">
         <strong style="display:block;margin-bottom:8px">Next Step</strong>
         <div style="font-size:13px;color:var(--text-dim);line-height:1.7">${escHtml(mockNextStep(report))}</div>
@@ -211,10 +233,10 @@ function renderCompletedView(el, session) {
       </div>
     </div>
   `;
-
   el.querySelector('#btn-start-new-mock')?.addEventListener('click', () => {
     _mockStore.clear();
-    renderLauncher(el);
+    sessionStorage.removeItem('coach_task_context');
+    render(el);
   });
 }
 
@@ -241,7 +263,7 @@ async function refreshSession(el, sessionId) {
     renderSessionView(el, session);
   } catch {
     _mockStore.clear();
-    renderLauncher(el);
+    render(el);
   }
 }
 
@@ -255,6 +277,10 @@ function openSection(session, section, index) {
     mock_section_index: index,
   }));
   navigate(section);
+}
+
+function getCoachTaskContext() {
+  try { return JSON.parse(sessionStorage.getItem('coach_task_context')); } catch { return null; }
 }
 
 function formatElapsed(seconds) {
@@ -272,6 +298,6 @@ function mockNextStep(report) {
   return '当前模考没有暴露出明显单点短板，下一轮建议优先优化时间分配，再观察 section 间波动。';
 }
 
-function escHtml(s) {
-  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function escHtml(value) {
+  return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

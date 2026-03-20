@@ -4,6 +4,7 @@ topic: community planning meeting
 exam: ielts
 content_type: listening
 dialogue_type: conversation
+question_types: multiple_choice
 ---
 A: Thank you all for coming to tonight's community meeting. The main item on the agenda is the proposed development of the old factory site on River Road.
 B: Before we get into the details, could you clarify what exactly is being proposed? The notice we received was quite vague.

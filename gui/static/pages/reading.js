@@ -460,7 +460,10 @@ function renderSplitLayout(el, r) {
 function practiceSummaryHtml(r) {
   const practice = r.practice || _activePractice;
   if (!practice) return '';
-  return `<span class="tag" style="border-color:var(--accent);color:var(--accent)">${escHtml(practiceSummaryText(practice))}</span>`;
+  return `
+    <span class="tag" style="border-color:var(--accent);color:var(--accent)">${escHtml(practiceSummaryText(practice))}</span>
+    ${practice.source === 'coach_plan' && practice.category ? `<span class="tag">${escHtml(practiceCategoryLabel(practice.category))}</span>` : ''}
+  `;
 }
 
 async function loadQuestion(el) {
@@ -635,6 +638,10 @@ function practiceSummaryText(practice) {
   if (practice.source === 'mock_exam') return `${exam} Mock Section`;
   const type = practice.type ? ` · ${typeLabel(practice.type)}` : '';
   return `${exam} Drill${type}`;
+}
+
+function practiceCategoryLabel(category) {
+  return { core: '核心内容', growth: '成长内容', sprint: '冲刺内容', ai_enhanced: 'AI 增强' }[category] || category || '';
 }
 
 function isMockSection() {

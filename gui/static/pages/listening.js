@@ -152,9 +152,12 @@ async function startSession(el) {
   const typeBtn = el.querySelector('.type-tab.btn-primary') || document.querySelector('.type-tab.btn-primary');
   const exam  = examBtn ? examBtn.dataset.exam  : 'general';
   const dtype = typeBtn ? typeBtn.dataset.type  : 'conversation';
+  const requestedType = _activePractice?.type || '';
 
   try {
-    const r = await api.post(`/api/listening/start?exam=${exam}&dialogue_type=${dtype}`, {});
+    const params = new URLSearchParams({ exam, dialogue_type: dtype });
+    if (requestedType) params.set('question_type', requestedType);
+    const r = await api.post(`/api/listening/start?${params}`, {});
 
     // Check if navigation was aborted while waiting for response
     if (window._currentAbortSignal?.aborted || !el.isConnected) {
@@ -185,7 +188,8 @@ async function startSession(el) {
 function renderShell(el, info) {
   const exam = (info.exam || 'general').toLowerCase();
   const examLabel = {toefl:'TOEFL',ielts:'IELTS',gre:'GRE',cet:'CET-4/6',general:'General'}[exam] || exam.toUpperCase();
-  const typeLabel = info.type === 'monologue' ? 'Lecture / Talk' : 'Conversation';
+  const dialogueLabel = info.type === 'monologue' ? 'Lecture / Talk' : 'Conversation';
+  const questionTypeLabel = info.question_type_label || (info.question_type ? typeLabel(info.question_type) : '');
 
   el.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -194,7 +198,8 @@ function renderShell(el, info) {
         ${practiceTagHtml()}
         <span class="tag">${examLabel}</span>
         <span class="tag">${info.difficulty || 'B1'}</span>
-        <span class="tag" style="color:var(--text-dim)">${typeLabel}</span>
+        ${questionTypeLabel ? `<span class="tag">${escHtml(questionTypeLabel)}</span>` : ''}
+        <span class="tag" style="color:var(--text-dim)">${dialogueLabel}</span>
         <button class="btn btn-outline" id="btn-new" style="font-size:12px;padding:4px 10px">New ↺</button>
       </div>
     </div>
@@ -625,8 +630,9 @@ function practiceBannerHtml() {
       <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--accent);margin-bottom:6px">
         ${_activePractice.source === 'mock_exam' ? 'MOCK EXAM' : 'PRACTICE MODE'}
       </div>
-      <div style="font-size:14px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:14px">
         ${escHtml(practiceSummaryText())}
+        ${_activePractice.source === 'coach_plan' && _activePractice.category ? `<span class="tag">${escHtml(practiceCategoryLabel(_activePractice.category))}</span>` : ''}
       </div>
     </div>
   `;
@@ -643,6 +649,10 @@ function practiceSummaryText() {
   const label = _activePractice.source === 'mock_exam' ? 'Mock Section' : 'Drill';
   const type = _activePractice.type ? ` · ${typeLabel(_activePractice.type)}` : '';
   return `${exam} ${label}${type}`;
+}
+
+function practiceCategoryLabel(category) {
+  return { core: '核心内容', growth: '成长内容', sprint: '冲刺内容', ai_enhanced: 'AI 增强' }[category] || category || '';
 }
 
 function isMockSection() {

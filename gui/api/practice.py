@@ -115,13 +115,13 @@ def _listening_state(exam: str, cefr: str, has_ai: bool) -> tuple[str, bool, str
         return (
             "direct",
             True,
-            "可直接进入 Listening 实战页；当前按题型映射到 conversation / lecture 预设，尚未做到严格按题型抽题。",
+            "可直接进入 Listening 实战页；系统会优先按题型命中内置素材，再回退到同类对话/讲座。",
         )
     if has_ai:
         return (
             "needs_ai",
             True,
-            "本地内置听力素材不足，将改用 AI 生成；当前仍按 conversation / lecture 预设进入。",
+            "本地内置听力素材不足时会改用 AI 生成，并优先保留当前题型目标。",
         )
     return (
         "construction",

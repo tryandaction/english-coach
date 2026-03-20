@@ -36,6 +36,7 @@ def get_content_dir() -> Path:
 _CONFIG_PATH = _get_config_path()
 _components = None  # cached tuple
 _BUILTIN_CONTENT_DIRS = ("grammar", "listening", "reading")
+_BUILTIN_VOCAB_DIRS = ("vocab", "vocab_selected", "vocab_expanded")
 
 
 def _load_env(data_dir: Path) -> None:
@@ -111,6 +112,22 @@ def _sync_builtin_content(kb, data_dir: Path) -> None:
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
+def _sync_builtin_vocab_if_needed(srs, profile) -> None:
+    if not profile:
+        return
+    row = srs._db.execute(
+        "SELECT COUNT(*) AS count FROM vocabulary WHERE source != 'user'"
+    ).fetchone()
+    if int(row["count"] or 0) > 0:
+        return
+
+    from core.vocab.catalog import sync_builtin_vocabulary
+
+    content_root = get_content_dir()
+    vocab_dirs = [content_root / dirname for dirname in _BUILTIN_VOCAB_DIRS]
+    sync_builtin_vocabulary(vocab_dirs, srs, profile)
+
+
 def load_config() -> dict:
     if not _CONFIG_PATH.exists():
         # Create default config on first run
@@ -181,6 +198,7 @@ def get_components():
 
     active_uid = cfg.get("active_user_id")
     profile = user_model.get_profile(active_uid) if active_uid else user_model.get_first_profile()
+    _sync_builtin_vocab_if_needed(srs, profile)
 
     _components = (kb, srs, user_model, ai, profile)
     return _components

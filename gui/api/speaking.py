@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import json
-import random
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from core.coach.recap import build_speaking_recap
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/speaking", tags=["speaking"])
@@ -108,6 +109,90 @@ class SpeakingSubmitRequest(BaseModel):
     exam: Optional[str] = None
     prompt: Optional[str] = None
     sample_response: Optional[str] = None
+    duration_sec: Optional[int] = None
+
+
+def _recent_task_stats(user_model, user_id: str, exam: str, days: int = 7) -> dict[str, dict[str, Any]]:
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = user_model._db.execute(
+        """SELECT content_json, ended_at
+           FROM sessions
+           WHERE user_id=? AND mode='speaking' AND ended_at IS NOT NULL AND ended_at>=?
+           ORDER BY ended_at DESC
+           LIMIT 40""",
+        (user_id, cutoff),
+    ).fetchall()
+    stats: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("exam", "")).lower() != str(exam).lower():
+            continue
+        task_type = str(payload.get("task_type", "")).strip().lower()
+        if not task_type:
+            continue
+        item = stats.setdefault(task_type, {"count": 0, "last_at": row["ended_at"]})
+        item["count"] += 1
+        if row["ended_at"] and str(row["ended_at"]) > str(item["last_at"]):
+            item["last_at"] = row["ended_at"]
+    return stats
+
+
+def _pick_task_type(explicit_task_type: Optional[str], available: list[str], stats: dict[str, dict[str, Any]], fallback: str) -> str:
+    if explicit_task_type and explicit_task_type in available:
+        return explicit_task_type
+    if not available:
+        return fallback
+    ranked = sorted(
+        available,
+        key=lambda task: (
+            stats.get(task, {}).get("count", 0),
+            stats.get(task, {}).get("last_at", ""),
+            task,
+        ),
+    )
+    return ranked[0]
+
+
+def _recent_prompt_texts(user_model, user_id: str, exam: str, task_type: str, days: int = 7) -> set[str]:
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = user_model._db.execute(
+        """SELECT content_json
+           FROM sessions
+           WHERE user_id=? AND mode='speaking' AND ended_at IS NOT NULL AND ended_at>=?
+           ORDER BY ended_at DESC
+           LIMIT 20""",
+        (user_id, cutoff),
+    ).fetchall()
+    prompts: set[str] = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("exam", "")).lower() != str(exam).lower():
+            continue
+        if str(payload.get("task_type", "")).lower() != str(task_type).lower():
+            continue
+        prompt = str(payload.get("prompt", "")).strip()
+        if prompt:
+            prompts.add(prompt)
+    return prompts
+
+
+def _rotated_choice(prompts: list[str], recent_prompts: set[str]) -> str:
+    if not prompts:
+        return ""
+    fresh = [prompt for prompt in prompts if prompt not in recent_prompts]
+    source = fresh if fresh else prompts
+    offset = datetime.now().toordinal() % len(source)
+    return (source[offset:] + source[:offset])[0]
 
 
 @router.get("/prompt")
@@ -117,8 +202,12 @@ def get_speaking_prompt(exam: Optional[str] = None, task_type: Optional[str] = N
         raise HTTPException(400, "No profile")
 
     target = (exam or profile.target_exam or "toefl").lower()
-    task = (task_type or ("independent" if target == "toefl" else "part1")).lower()
+    available = list(_TOEFL_PROMPTS.keys()) if target == "toefl" else list(_IELTS_PROMPTS.keys())
+    fallback = "independent" if target == "toefl" else "part1"
+    stats = _recent_task_stats(user_model, profile.user_id, target)
+    task = _pick_task_type((task_type or "").lower() or None, available, stats, fallback)
     cefr = profile.cefr_level or "B2"
+    recent_prompts = _recent_prompt_texts(user_model, profile.user_id, target, task)
 
     if target == "toefl":
         if task == "listen_repeat":
@@ -189,7 +278,7 @@ def get_speaking_prompt(exam: Optional[str] = None, task_type: Optional[str] = N
             "prep_seconds": prompt_def["prep_seconds"],
             "speak_seconds": prompt_def["speak_seconds"],
             "instructions": prompt_def["instructions"],
-            "prompt": random.choice(prompt_def["prompts"]),
+            "prompt": _rotated_choice(prompt_def["prompts"], recent_prompts),
             "scoring_criteria": "Delivery, language use, topic development",
         }
 
@@ -202,7 +291,7 @@ def get_speaking_prompt(exam: Optional[str] = None, task_type: Optional[str] = N
             "prep_seconds": prompt_def["prep_seconds"],
             "speak_seconds": prompt_def["speak_seconds"],
             "instructions": prompt_def["instructions"],
-            "prompt": random.choice(prompt_def["prompts"]),
+            "prompt": _rotated_choice(prompt_def["prompts"], recent_prompts),
             "scoring_criteria": "Fluency, coherence, vocabulary range, grammar control",
         }
 
@@ -273,11 +362,18 @@ def submit_speaking(req: SpeakingSubmitRequest):
     overall = float(result.get("overall", 0) or 0)
     score_ratio = max(0.0, min(1.0, overall / 4.0))
     db_sid = user_model.start_session(profile.user_id, "speaking")
+    word_count = len((transcript or "").split())
+    recap = build_speaking_recap(
+        task_type=task_type,
+        overall=overall,
+        score_max=4.0,
+        word_count=word_count,
+    )
     user_model.record_answer(profile.user_id, "speaking_structure", score_ratio >= 0.6)
     user_model.record_answer(profile.user_id, "speaking_vocabulary", score_ratio >= 0.6)
     user_model.end_session(
         db_sid,
-        0,
+        max(0, int(req.duration_sec or 0)),
         1,
         score_ratio,
         content_json=json.dumps({
@@ -285,6 +381,10 @@ def submit_speaking(req: SpeakingSubmitRequest):
             "task_type": task_type,
             "prompt": req.prompt or "",
             "overall": overall,
+            "duration_sec": max(0, int(req.duration_sec or 0)),
+            "word_count": word_count,
+            "transcript_preview": transcript[:220],
+            **recap,
         }),
     )
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from core.coach.service import CoachService
+from gui.coach_runtime import build_coach_runtime
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/progress", tags=["progress"])
@@ -50,6 +52,8 @@ def _empty_progress(ai_ready: bool) -> dict:
         "today_summary": {"sessions": 0, "minutes": 0, "items": 0},
         "total_study_minutes": 0,
         "learning_days": 0,
+        "target_exam_date": "",
+        "coach_summary": {},
     }
 
 
@@ -58,6 +62,8 @@ def get_progress():
     kb, srs, user_model, ai, profile = get_components()
     if not profile:
         return _empty_progress(ai is not None)
+    coach_service = CoachService(user_model, profile, build_coach_runtime())
+    coach_summary = coach_service.coach_summary()
 
     summary = user_model.progress_summary(profile.user_id)
     deck = srs.deck_stats(profile.user_id)
@@ -146,4 +152,6 @@ def get_progress():
         },
         "total_study_minutes": int(profile.total_study_minutes or 0),
         "learning_days": int(learning_days or 0),
+        "target_exam_date": getattr(profile, "target_exam_date", "") or "",
+        "coach_summary": coach_summary,
     }

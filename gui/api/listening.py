@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from core.coach.recap import build_listening_recap
 from gui.deps import get_components, get_content_dir
 
 router = APIRouter(prefix="/api/listening", tags=["listening"])
@@ -28,6 +30,91 @@ _VOICE_B    = "en-US-GuyNeural"
 _VOICE_MONO = "en-GB-SoniaNeural"
 
 _CONTENT_DIR = get_content_dir() / "listening"
+
+_QUESTION_TYPE_LABELS = {
+    "detail": "Detail",
+    "inference": "Inference",
+    "organization": "Organization",
+    "attitude": "Attitude",
+    "multiple_choice": "Multiple Choice",
+    "form_completion": "Form Completion",
+    "matching": "Matching",
+    "gist_content": "Gist Content",
+    "gist_purpose": "Gist Purpose",
+    "function": "Function",
+    "connecting": "Connecting Content",
+}
+
+
+def _normalize_question_type(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "mc": "multiple_choice",
+        "multiplechoice": "multiple_choice",
+        "fill": "form_completion",
+        "form": "form_completion",
+        "note_completion": "form_completion",
+        "organization_of_information": "organization",
+    }
+    return aliases.get(text, text)
+
+
+def _parse_question_types(value) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[,\|]", str(value or ""))
+    items: list[str] = []
+    for raw in raw_items:
+        normalized = _normalize_question_type(raw)
+        if normalized and normalized not in items:
+            items.append(normalized)
+    return items
+
+
+def _question_type_label(value: Optional[str]) -> str:
+    normalized = _normalize_question_type(value)
+    return _QUESTION_TYPE_LABELS.get(normalized, normalized.replace("_", " ").title())
+
+
+def _extract_question_types(data: Optional[dict]) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    explicit = _parse_question_types(data.get("question_types"))
+    if explicit:
+        return explicit
+    derived: list[str] = []
+    for question in data.get("questions", []) or []:
+        qtype = _normalize_question_type(question.get("type"))
+        if qtype and qtype not in derived:
+            derived.append(qtype)
+    return derived
+
+
+def _question_type_matches(data: Optional[dict], question_type: Optional[str]) -> bool:
+    normalized = _normalize_question_type(question_type)
+    if not normalized:
+        return True
+    return normalized in _extract_question_types(data)
+
+
+def _parse_builtin_file(path: Path) -> Optional[tuple[dict, str]]:
+    try:
+        text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    except Exception:
+        return None
+    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not fm_match:
+        return None
+    meta: dict[str, object] = {}
+    for line in fm_match.group(1).splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        meta[key] = _parse_question_types(value) if key == "question_types" else value
+    return meta, text[fm_match.end():]
 
 
 # ── TOEFL Listening Question Type Endpoints ──────────────────────────────────
@@ -82,6 +169,36 @@ _POOL_TARGET = 6  # fill up to this many per (exam, type) combo
 _replenish_task: Optional[asyncio.Task] = None
 
 
+def _recent_listening_topics(user_model, user_id: str, exam: str, dialogue_type: str, days: int = 7) -> set[str]:
+    from datetime import datetime, timedelta
+
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = user_model._db.execute(
+        """SELECT content_json
+           FROM sessions
+           WHERE user_id=? AND mode='listening' AND ended_at IS NOT NULL AND ended_at>=?
+           ORDER BY ended_at DESC
+           LIMIT 20""",
+        (user_id, cutoff),
+    ).fetchall()
+    topics: set[str] = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("exam", "")).lower() != str(exam).lower():
+            continue
+        if str(payload.get("dialogue_type", "")).lower() != str(dialogue_type).lower():
+            continue
+        topic = str(payload.get("topic", "")).strip().lower()
+        if topic:
+            topics.add(topic)
+    return topics
+
+
 def _get_pool_db() -> sqlite3.Connection:
     global _pool_db
     if _pool_db is not None:
@@ -120,43 +237,78 @@ def _get_pool_db() -> sqlite3.Connection:
     return conn
 
 
-def _pool_count(exam: str, dtype: str) -> int:
+def _pool_count(exam: str, dtype: str, question_type: Optional[str] = None) -> int:
     try:
         conn = _get_pool_db()
         with _pool_lock:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM pool WHERE exam=? AND dtype=?",
+            rows = conn.execute(
+                "SELECT data_json FROM pool WHERE exam=? AND dtype=?",
                 (exam, dtype)
-            ).fetchone()
-        return row[0] if row else 0
+            ).fetchall()
+        if not question_type:
+            return len(rows)
+        normalized = _normalize_question_type(question_type)
+        count = 0
+        for row in rows:
+            try:
+                data = json.loads(row[0] or "{}")
+            except Exception:
+                data = {}
+            if _question_type_matches(data, normalized):
+                count += 1
+        return count
     except Exception:
         return 0
 
 
-def _pool_pop(exam: str, dtype: str, difficulty: str) -> Optional[dict]:
-    """Pop the best matching item from the pool (exact difficulty first, then any)."""
+def _pool_pop(
+    exam: str,
+    dtype: str,
+    difficulty: str,
+    exclude_topics: Optional[set[str]] = None,
+    question_type: Optional[str] = None,
+) -> Optional[dict]:
+    """Pop the best matching item from the pool.
+
+    Priority: requested question type -> fresh topic -> exact difficulty.
+    """
     try:
         conn = _get_pool_db()
+        exclude_topics = {str(item).strip().lower() for item in (exclude_topics or set()) if str(item).strip()}
+        requested_qtype = _normalize_question_type(question_type)
         with _pool_lock:
-            # Try exact difficulty first
-            row = conn.execute(
-                "SELECT id, data_json, audio_path, timestamps_json FROM pool "
-                "WHERE exam=? AND dtype=? AND difficulty=? ORDER BY RANDOM() LIMIT 1",
-                (exam, dtype, difficulty)
-            ).fetchone()
-            if not row:
-                # Fallback: any difficulty
-                row = conn.execute(
-                    "SELECT id, data_json, audio_path, timestamps_json FROM pool "
-                    "WHERE exam=? AND dtype=? ORDER BY RANDOM() LIMIT 1",
-                    (exam, dtype)
-                ).fetchone()
-            if not row:
+            rows = conn.execute(
+                "SELECT id, data_json, audio_path, timestamps_json, topic, difficulty "
+                "FROM pool WHERE exam=? AND dtype=? ORDER BY RANDOM()",
+                (exam, dtype),
+            ).fetchall()
+            best_row = None
+            best_score = None
+            for row in rows:
+                row_topic = str(row[4] or "").strip().lower()
+                row_difficulty = str(row[5] or "").strip()
+                try:
+                    data = json.loads(row[1] or "{}")
+                except Exception:
+                    data = {}
+                score = (
+                    0 if _question_type_matches(data, requested_qtype) else 1,
+                    0 if row_topic not in exclude_topics else 1,
+                    0 if row_difficulty == difficulty else 1,
+                )
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_row = row
+                    if score == (0, 0, 0):
+                        break
+            if not best_row:
                 return None
-            pid, data_json, audio_path, ts_json = row
+            pid, data_json, audio_path, ts_json = best_row[:4]
             conn.execute("DELETE FROM pool WHERE id=?", (pid,))
             conn.commit()
         data = json.loads(data_json)
+        if "question_types" not in data:
+            data["question_types"] = _extract_question_types(data)
         timestamps = json.loads(ts_json) if ts_json else []
         # Verify audio still exists
         if audio_path and not Path(audio_path).exists():
@@ -186,50 +338,74 @@ def _pool_push(exam: str, dtype: str, difficulty: str, data: dict,
 
 # ── Built-in script loader ────────────────────────────────────────────────────
 
-def _load_builtin_script(exam: str, dialogue_type: str, cefr: str) -> Optional[dict]:
+def _load_builtin_script(
+    exam: str,
+    dialogue_type: str,
+    cefr: str,
+    exclude_topics: Optional[set[str]] = None,
+    question_type: Optional[str] = None,
+) -> Optional[dict]:
     if not _CONTENT_DIR.exists():
         return None
     candidates = []
+    exclude_topics = {str(item).strip().lower() for item in (exclude_topics or set()) if str(item).strip()}
+    requested_qtype = _normalize_question_type(question_type)
+
+    def _matches(meta: dict[str, object], *, strict_exam: bool, strict_topic: bool) -> bool:
+        file_exam = str(meta.get("exam", "general") or "general")
+        file_type = str(meta.get("dialogue_type", "conversation") or "conversation")
+        file_diff = str(meta.get("difficulty", "B1") or "B1")
+        meta_question_types = _parse_question_types(meta.get("question_types"))
+        exam_match = (exam == "general" or file_exam == exam or file_exam == "general")
+        type_match = (file_type == dialogue_type)
+        cefr_levels = ["A1", "A2", "B1", "B2", "C1", "C2"]
+        try:
+            diff_match = abs(cefr_levels.index(cefr) - cefr_levels.index(file_diff)) <= 1
+        except ValueError:
+            diff_match = True
+        topic = str(meta.get("topic", "")).strip().lower()
+        if strict_exam and not (exam_match and diff_match):
+            return False
+        if not type_match:
+            return False
+        if strict_topic and topic in exclude_topics:
+            return False
+        if requested_qtype and requested_qtype not in meta_question_types:
+            return False
+        return True
+
     for f in _CONTENT_DIR.glob("*.md"):
         try:
-            text = f.read_text(encoding="utf-8").replace("\r\n", "\n")
-            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
-            if not fm_match:
+            parsed = _parse_builtin_file(f)
+            if not parsed:
                 continue
-            meta = {}
-            for line in fm_match.group(1).splitlines():
-                if ":" in line:
-                    k, _, v = line.partition(":")
-                    meta[k.strip()] = v.strip()
-            file_exam  = meta.get("exam", "general")
-            file_type  = meta.get("dialogue_type", "conversation")
-            file_diff  = meta.get("difficulty", "B1")
-            exam_match = (exam == "general" or file_exam == exam or file_exam == "general")
-            type_match = (file_type == dialogue_type)
-            cefr_levels = ["A1","A2","B1","B2","C1","C2"]
-            try:
-                diff_match = abs(cefr_levels.index(cefr) - cefr_levels.index(file_diff)) <= 1
-            except ValueError:
-                diff_match = True
-            if exam_match and type_match and diff_match:
-                candidates.append((f, meta, text[fm_match.end():]))
+            meta, body = parsed
+            if _matches(meta, strict_exam=True, strict_topic=True):
+                candidates.append((f, meta, body))
         except Exception:
             continue
 
     if not candidates:
         for f in _CONTENT_DIR.glob("*.md"):
             try:
-                text = f.read_text(encoding="utf-8").replace("\r\n", "\n")
-                fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
-                if not fm_match:
+                parsed = _parse_builtin_file(f)
+                if not parsed:
                     continue
-                meta = {}
-                for line in fm_match.group(1).splitlines():
-                    if ":" in line:
-                        k, _, v = line.partition(":")
-                        meta[k.strip()] = v.strip()
-                if meta.get("dialogue_type", "conversation") == dialogue_type:
-                    candidates.append((f, meta, text[fm_match.end():]))
+                meta, body = parsed
+                if _matches(meta, strict_exam=False, strict_topic=True):
+                    candidates.append((f, meta, body))
+            except Exception:
+                continue
+
+    if not candidates:
+        for f in _CONTENT_DIR.glob("*.md"):
+            try:
+                parsed = _parse_builtin_file(f)
+                if not parsed:
+                    continue
+                meta, body = parsed
+                if _matches(meta, strict_exam=False, strict_topic=False):
+                    candidates.append((f, meta, body))
             except Exception:
                 continue
 
@@ -262,12 +438,17 @@ def _load_builtin_script(exam: str, dialogue_type: str, cefr: str) -> Optional[d
     if not script or not questions:
         return None
 
+    question_types = _parse_question_types(meta.get("question_types"))
+    if not question_types:
+        question_types = _extract_question_types({"questions": questions})
+
     return {
         "type": meta.get("dialogue_type", dialogue_type),
         "topic": meta.get("topic", ""),
         "difficulty": meta.get("difficulty", cefr),
         "script": script,
         "questions": questions,
+        "question_types": question_types,
         "source": "builtin",
     }
 
@@ -330,15 +511,19 @@ _COMBOS = [
     ("gre",     "monologue"),
 ]
 
-async def _replenish_pool(target_exam: str = "general", target_dtype: str = "conversation",
-                          cefr: str = "B1") -> None:
+async def _replenish_pool(
+    target_exam: str = "general",
+    target_dtype: str = "conversation",
+    cefr: str = "B1",
+    question_type: Optional[str] = None,
+) -> None:
     """Fill pool up to _POOL_TARGET for ONE (exam, dtype) combo only."""
-    current = _pool_count(target_exam, target_dtype)
+    current = _pool_count(target_exam, target_dtype, question_type=question_type)
     needed  = _POOL_TARGET - current
     if needed <= 0:
         return
     for _ in range(needed):
-        data = _load_builtin_script(target_exam, target_dtype, cefr)
+        data = _load_builtin_script(target_exam, target_dtype, cefr, question_type=question_type)
         if not data:
             break
         audio_path, timestamps = await _synthesize_audio(data["script"], target_dtype)
@@ -346,13 +531,13 @@ async def _replenish_pool(target_exam: str = "general", target_dtype: str = "con
         await asyncio.sleep(0)  # yield to event loop
 
 
-async def _maybe_replenish(exam: str, dtype: str, cefr: str) -> None:
+async def _maybe_replenish(exam: str, dtype: str, cefr: str, question_type: Optional[str] = None) -> None:
     """Trigger background replenishment if pool is running low."""
     global _replenish_task
-    current = _pool_count(exam, dtype)
+    current = _pool_count(exam, dtype, question_type=question_type)
     if current < _POOL_MIN:
         if _replenish_task is None or _replenish_task.done():
-            _replenish_task = asyncio.create_task(_replenish_pool(exam, dtype, cefr))
+            _replenish_task = asyncio.create_task(_replenish_pool(exam, dtype, cefr, question_type=question_type))
 
 
 # ── Startup pool seeding ──────────────────────────────────────────────────────
@@ -402,35 +587,82 @@ async def start_listening(
     exam: Optional[str] = None,
     difficulty: Optional[str] = None,
     dialogue_type: str = "conversation",
+    question_type: Optional[str] = None,
 ):
     kb, srs, user_model, ai, profile = get_components()
     if not profile:
         raise HTTPException(400, "No profile configured")
 
-    cefr        = difficulty or profile.cefr_level or "B1"
+    cefr = difficulty or profile.cefr_level or "B1"
     target_exam = exam or profile.target_exam or "general"
+    requested_qtype = _normalize_question_type(question_type)
+    recent_topics = _recent_listening_topics(user_model, profile.user_id, target_exam, dialogue_type)
+
+    data = None
+    audio_path = None
+    timestamps: list[dict] = []
 
     # Try pool first (instant)
-    pooled = _pool_pop(target_exam, dialogue_type, cefr)
+    pooled = _pool_pop(
+        target_exam,
+        dialogue_type,
+        cefr,
+        exclude_topics=recent_topics,
+        question_type=requested_qtype,
+    )
     if pooled:
-        data       = pooled["data"]
+        data = pooled["data"]
         audio_path = pooled["audio_path"]
         timestamps = pooled["timestamps"]
         # If audio file was lost, re-synthesise quickly
         if not audio_path:
             audio_path, timestamps = await _synthesize_audio(data["script"], dialogue_type)
-    else:
-        # Pool empty — generate on demand (built-in first, AI fallback)
-        data = _load_builtin_script(target_exam, dialogue_type, cefr)
-        if not data:
-            if not ai:
-                raise HTTPException(400, "No built-in script found and AI not configured")
-            data = ai.generate_listening_dialogue(cefr, target_exam, dialogue_type)
+    if not data and requested_qtype:
+        data = _load_builtin_script(
+            target_exam,
+            dialogue_type,
+            cefr,
+            exclude_topics=recent_topics,
+            question_type=requested_qtype,
+        )
+        if data:
+            audio_path, timestamps = await _synthesize_audio(data["script"], dialogue_type)
+    if not data and requested_qtype and ai:
+        generated = ai.generate_listening_dialogue(
+            cefr,
+            target_exam,
+            dialogue_type,
+            question_types=[requested_qtype],
+        )
+        if generated and generated.get("script"):
+            data = generated
+            data["question_types"] = _extract_question_types(data) or [requested_qtype]
+            audio_path, timestamps = await _synthesize_audio(data["script"], dialogue_type)
+    if not data:
+        pooled = _pool_pop(target_exam, dialogue_type, cefr, exclude_topics=recent_topics)
+        if pooled:
+            data = pooled["data"]
+            audio_path = pooled["audio_path"]
+            timestamps = pooled["timestamps"]
+            if not audio_path:
+                audio_path, timestamps = await _synthesize_audio(data["script"], dialogue_type)
+    if not data:
+        data = _load_builtin_script(target_exam, dialogue_type, cefr, exclude_topics=recent_topics)
+        if data:
+            audio_path, timestamps = await _synthesize_audio(data["script"], dialogue_type)
+    if not data:
+        if not ai:
+            raise HTTPException(400, "No built-in script found and AI not configured")
+        data = ai.generate_listening_dialogue(cefr, target_exam, dialogue_type)
+        data["question_types"] = _extract_question_types(data)
         if not data or not data.get("script"):
             raise HTTPException(500, "Failed to generate listening content")
         audio_path, timestamps = await _synthesize_audio(data["script"], dialogue_type)
 
+    matched_qtype = requested_qtype if _question_type_matches(data, requested_qtype) else ""
+
     sid = str(uuid.uuid4())
+    db_sid = user_model.start_session(profile.user_id, "listening")
     _sessions[sid] = {
         "data": data,
         "audio_path": audio_path,
@@ -439,15 +671,24 @@ async def start_listening(
         "play_count": 0,
         "cefr": cefr,
         "exam": target_exam,
+        "dialogue_type": dialogue_type,
+        "requested_question_type": requested_qtype,
+        "db_session_id": db_sid,
+        "started_at": datetime.now().isoformat(),
+        "completed": False,
     }
 
     # Replenish pool in background immediately after session starts
-    asyncio.create_task(_maybe_replenish(target_exam, dialogue_type, cefr))
+    asyncio.create_task(_maybe_replenish(target_exam, dialogue_type, cefr, question_type=requested_qtype or None))
 
     return {
         "session_id":     sid,
         "topic":          data.get("topic", ""),
         "type":           data.get("type", dialogue_type),
+        "dialogue_type":  dialogue_type,
+        "question_type":  matched_qtype or requested_qtype or "",
+        "question_type_label": _question_type_label(matched_qtype or requested_qtype),
+        "question_types": _extract_question_types(data),
         "difficulty":     cefr,
         "exam":           target_exam,
         "question_count": len(data.get("questions", [])),
@@ -512,6 +753,7 @@ def get_question(session_id: str, index: int):
 
 @router.post("/answer/{session_id}")
 def submit_answer(session_id: str, req: AnswerRequest):
+    kb, srs, user_model, ai, profile = get_components()
     sess = _sessions.get(session_id)
     if not sess:
         raise HTTPException(404, "Session not found")
@@ -525,6 +767,47 @@ def submit_answer(session_id: str, req: AnswerRequest):
     is_correct = user_ans == correct
     sess["answers"][idx] = {"user": user_ans, "correct": correct, "is_correct": is_correct}
     all_answered = len(sess["answers"]) >= len(questions)
+    if all_answered and not sess.get("completed") and profile:
+        correct_count = sum(1 for item in sess["answers"].values() if item.get("is_correct"))
+        accuracy = correct_count / max(len(questions), 1)
+        available_qtypes = _extract_question_types(sess.get("data", {}))
+        requested_qtype = str(sess.get("requested_question_type", "") or "").strip()
+        recap = build_listening_recap(
+            topic=sess["data"].get("topic", ""),
+            correct=correct_count,
+            total=len(questions),
+            question_type=requested_qtype or (available_qtypes[0] if available_qtypes else ""),
+            dialogue_type=sess.get("dialogue_type", ""),
+        )
+        content_json = json.dumps(
+            {
+                "exam": sess.get("exam", ""),
+                "dialogue_type": sess.get("dialogue_type", ""),
+                "question_type": requested_qtype,
+                "question_types": available_qtypes,
+                "topic": sess["data"].get("topic", ""),
+                "source": sess["data"].get("source", "builtin"),
+                "question_count": len(questions),
+                "correct": correct_count,
+                **recap,
+            },
+            ensure_ascii=False,
+        )
+        started_at = sess.get("started_at")
+        duration_sec = 0
+        if started_at:
+            try:
+                duration_sec = max(0, int((datetime.now() - datetime.fromisoformat(started_at)).total_seconds()))
+            except ValueError:
+                duration_sec = 0
+        user_model.end_session(
+            sess["db_session_id"],
+            duration_sec,
+            len(questions),
+            accuracy,
+            content_json=content_json,
+        )
+        sess["completed"] = True
     return {
         "correct":          is_correct,
         "correct_answer":   correct,

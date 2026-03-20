@@ -11,15 +11,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from core.vocab.catalog import (
-    builtin_book_blueprint,
     derive_subject,
-    merge_word_payload,
     normalize_difficulty,
     normalize_exam_type,
     normalize_word,
     parse_vocab_markdown,
     scan_content_library,
-    should_include_builtin_book,
+    sync_builtin_vocabulary,
 )
 from gui.deps import _CONFIG_PATH, get_components, get_content_dir, load_config
 
@@ -61,11 +59,6 @@ def _derive_subject(topic: str, source: str) -> str:
 
 def _parse_vocab_markdown(md_file: Path) -> tuple[dict, list[dict]]:
     return parse_vocab_markdown(md_file=md_file)
-
-
-def _build_builtin_book(source: str, exam_type: str) -> tuple[str, str, str]:
-    blueprint = builtin_book_blueprint(source, {"exam": exam_type})
-    return (blueprint["name"], blueprint["icon"], blueprint["color"])
 
 
 def _lookup_existing_word(srs, word: str):
@@ -189,52 +182,6 @@ def _db_vocab_stats(srs) -> dict[str, Any]:
         "by_exam": [dict(r) for r in exam_rows],
         "by_book_group": [dict(r) for r in group_rows],
     }
-
-
-def _sync_builtin_book(profile, srs, blueprint: dict[str, Any], word_ids: list[str]) -> dict | None:
-    if not profile:
-        return None
-    book = srs.get_word_book_by_key(profile.user_id, blueprint["book_key"])
-    payload = {
-        "book_key": blueprint["book_key"],
-        "exam": blueprint["exam"],
-        "source": blueprint["source"],
-        "level": blueprint["level"],
-        "topic": blueprint["topic"],
-        "is_builtin": 1,
-        "book_group": blueprint["book_group"],
-        "recommended_order": blueprint["recommended_order"],
-        "source_label": blueprint["source_label"],
-        "source_type": blueprint["source_type"],
-        "series": blueprint.get("series", ""),
-        "skill_focus": blueprint.get("skill_focus", ""),
-        "stage": blueprint.get("stage", ""),
-        "curation_note": blueprint.get("curation_note", ""),
-    }
-    if book:
-        srs.update_word_book(
-            book["book_id"],
-            profile.user_id,
-            name=blueprint["name"],
-            description=blueprint["description"],
-            color=blueprint["color"],
-            icon=blueprint["icon"],
-            **payload,
-        )
-        book_id = book["book_id"]
-    else:
-        book = srs.create_word_book(
-            user_id=profile.user_id,
-            name=blueprint["name"],
-            description=blueprint["description"],
-            color=blueprint["color"],
-            icon=blueprint["icon"],
-            **payload,
-        )
-        book_id = book["book_id"]
-    for word_id in word_ids:
-        srs.add_word_to_book(book_id, word_id)
-    return srs.get_word_book(book_id, profile.user_id)
 
 
 @router.post("/start")
@@ -442,111 +389,7 @@ def ingest_builtin():
     content_dirs = [path for path in _VOCAB_CONTENT_DIRS if path.exists()]
     if not content_dirs:
         return {"ok": True, "imported": 0, "message": "No vocab content directories"}
-
-    total_processed = 0
-    total_new = 0
-    total_linked_user_words = 0
-    books_synced: dict[str, dict] = {}
-    files_processed = []
-
-    for vocab_dir in content_dirs:
-        for md_file in sorted(vocab_dir.glob("*.md")):
-            fm, rows = _parse_vocab_markdown(md_file)
-            if not should_include_builtin_book(md_file.stem, fm):
-                continue
-            if not rows:
-                continue
-
-            source = fm.get("source", md_file.stem)
-            difficulty = _normalize_difficulty(fm.get("difficulty", "B1"))
-            topic = fm.get("topic", "general")
-            exam_type = _normalize_exam_type(fm.get("exam", source))
-            subject_domain = _derive_subject(topic, source)
-            level = 3 if difficulty.startswith("C") else 2
-            difficulty_score = 7 if difficulty.startswith("C") else 5 if difficulty.startswith("B2") else 3
-            blueprint = builtin_book_blueprint(md_file.stem, fm, md_file)
-
-            processed = 0
-            word_ids = []
-            linked_user_words = 0
-            new_words = 0
-            for row in rows:
-                incoming = {
-                    **row,
-                    "derivatives": row.get("derivatives", ""),
-                    "collocations": row.get("collocations", ""),
-                    "context_sentence": row.get("context_sentence", ""),
-                    "pronunciation": row.get("pronunciation", ""),
-                    "usage_notes": row.get("usage_notes", ""),
-                }
-                existing = _lookup_existing_word(srs, row["word"])
-                if existing and (existing["source"] or "").lower() == "user":
-                    linked_user_words += 1
-                    word_ids.append(existing["word_id"])
-                    processed += 1
-                    continue
-
-                wid = srs.add_word(
-                    word=row["word"],
-                    definition_en=row["definition_en"],
-                    definition_zh=row["definition_zh"],
-                    example=row["example"],
-                    topic=topic,
-                    difficulty=difficulty,
-                    source=source,
-                    synonyms=row["synonyms"],
-                    antonyms=row["antonyms"],
-                    part_of_speech=row["part_of_speech"],
-                    level=level,
-                    category=topic,
-                    difficulty_score=difficulty_score,
-                    exam_type=exam_type,
-                    subject_domain=subject_domain,
-                )
-                if not existing:
-                    new_words += 1
-                updates = merge_word_payload(
-                    dict(existing) if existing else None,
-                    incoming,
-                    exam_type=exam_type,
-                    topic=topic,
-                    subject_domain=subject_domain,
-                    difficulty=difficulty,
-                    level=level,
-                    difficulty_score=difficulty_score,
-                )
-                if updates:
-                    srs.update_word_fields(wid, **updates)
-                word_ids.append(wid)
-                processed += 1
-
-            total_processed += processed
-            total_new += new_words
-            total_linked_user_words += linked_user_words
-            files_processed.append({
-                "dir": vocab_dir.name,
-                "file": md_file.name,
-                "processed_words": processed,
-                "new_words": new_words,
-                "linked_user_words": linked_user_words,
-                "exam": exam_type,
-                "book_key": blueprint["book_key"],
-                "book_name": blueprint["name"],
-            })
-
-            if word_ids and profile:
-                synced = _sync_builtin_book(profile, srs, blueprint, word_ids)
-                if synced:
-                    books_synced[blueprint["book_key"]] = synced
-
-    return {
-        "ok": True,
-        "processed_words": total_processed,
-        "imported": total_new,
-        "linked_user_words": total_linked_user_words,
-        "books_synced": list(books_synced.values()),
-        "files": files_processed,
-    }
+    return sync_builtin_vocabulary(content_dirs, srs, profile)
 
 
 # ── Tag endpoints ──────────────────────────────────────────────────

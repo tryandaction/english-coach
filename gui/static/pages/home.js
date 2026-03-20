@@ -1,40 +1,35 @@
-// pages/home.js — Dashboard
+// pages/home.js — Coach-first dashboard
 
 export async function render(el) {
   let setupStatus = {};
-  let data = {};
+  let progress = {};
+  let coach = {};
   let licStatus = {};
 
   try {
     setupStatus = await api.get('/api/setup/status');
     if (window._currentAbortSignal?.aborted || !el.isConnected) return;
-  } catch (e) {
-    if (e.name === 'AbortError' || !el.isConnected) return;
-  }
-
-  try {
-    data = await api.get('/api/progress');
+    progress = await api.get('/api/progress');
     if (window._currentAbortSignal?.aborted || !el.isConnected) return;
+    coach = await api.get('/api/coach/status').catch(() => ({}));
+    if (window._currentAbortSignal?.aborted || !el.isConnected) return;
+    if ((setupStatus.version_mode || 'opensource') === 'cloud') {
+      licStatus = await api.get('/api/license/status').catch(() => ({}));
+      if (window._currentAbortSignal?.aborted || !el.isConnected) return;
+    }
   } catch (e) {
     if (e.name === 'AbortError' || !el.isConnected) return;
-  }
-
-  if ((setupStatus.version_mode || 'opensource') === 'cloud') {
-    try {
-      licStatus = await api.get('/api/license/status');
-      if (window._currentAbortSignal?.aborted || !el.isConnected) return;
-    } catch (e) {
-      if (e.name === 'AbortError' || !el.isConnected) return;
-    }
+    renderError(el, e.message, () => render(el));
+    return;
   }
 
   const runtime = buildRuntime(setupStatus, licStatus);
-  if (!setupStatus.has_profile || data.error === 'no_profile') {
+  if (!setupStatus.has_profile || progress.error === 'no_profile') {
     renderSetupRequired(el, runtime);
     return;
   }
 
-  renderDashboard(el, data, runtime);
+  renderDashboard(el, progress, runtime, coach);
 }
 
 function buildRuntime(setupStatus, licStatus) {
@@ -96,17 +91,14 @@ function renderSetupRequired(el, runtime) {
   el.querySelector('#btn-go-license')?.addEventListener('click', () => navigate('license'));
 }
 
-function renderDashboard(el, data, runtime) {
+function renderDashboard(el, data, runtime, coach) {
+  const coachPlan = coach.plan || { tasks: [], summary: {} };
+  const coachSummary = coach.coach_summary || data.coach_summary || {};
   const counts = data.mode_counts || {};
-  const cefr = data.cefr_level || '?';
   const streak = data.streak_days || 0;
-  const due = data.srs_due ?? 0;
-  const sessions = data.total_sessions || 0;
   const exam = (data.target_exam || 'general').toUpperCase();
+  const examDate = data.target_exam_date || '';
   const today = data.today_summary || { sessions: 0, minutes: 0, items: 0 };
-  const recentSessions = data.recent_sessions || [];
-  const onboardingDone = localStorage.getItem('onboarding_done') === '1';
-  const isNew = sessions < 3;
   const aiSummary = runtime.cloudActive && !runtime.aiReady
     ? 'Cloud 已激活，但 AI 当前未就绪'
     : runtime.aiMode === 'cloud'
@@ -118,8 +110,9 @@ function renderDashboard(el, data, runtime) {
   el.innerHTML = `
     <h1>欢迎回来${data.name ? `，${escHtml(data.name)}` : ''}</h1>
     <p style="margin-bottom:18px">
-      CEFR <span class="tag">${cefr}</span>
-      &nbsp;·&nbsp; 目标考试 <span class="tag">${exam}</span>
+      CEFR <span class="tag">${escHtml(data.cefr_level || '?')}</span>
+      &nbsp;·&nbsp; 目标考试 <span class="tag">${escHtml(exam)}</span>
+      ${examDate ? `&nbsp;·&nbsp;<span class="tag">考试日期 ${escHtml(examDate)}</span>` : ''}
       ${streak ? `&nbsp;·&nbsp;<span class="tag tag-yellow">🔥 连续 ${streak} 天</span>` : ''}
     </p>
 
@@ -130,8 +123,9 @@ function renderDashboard(el, data, runtime) {
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
             <span class="tag">${runtime.versionMode === 'cloud' ? 'Cloud 版本' : 'Open Source 版本'}</span>
             <span class="tag">${escHtml(aiSummary)}</span>
+            <span class="tag">${tierLabel(coach.tier || coachSummary.tier || 'free')}</span>
+            <span class="tag">${stageLabel(coach.stage || coachSummary.plan_stage || 'growth')}</span>
             ${runtime.cloudActive ? '<span class="tag tag-green">License 已激活</span>' : ''}
-            ${runtime.needsReactivation ? '<span class="tag" style="color:var(--red)">需要重新激活</span>' : ''}
           </div>
           <div style="font-size:13px;color:var(--text-dim);line-height:1.7">${escHtml(runtimeLine(runtime))}</div>
         </div>
@@ -144,133 +138,96 @@ function renderDashboard(el, data, runtime) {
     </div>
 
     <div class="stats-row">
-      <div class="stat-badge"><div class="val">${due}</div><div class="lbl">今日待复习</div></div>
-      <div class="stat-badge"><div class="val">${data.srs_total ?? 0}</div><div class="lbl">累计词汇</div></div>
+      <div class="stat-badge"><div class="val">${data.srs_due ?? 0}</div><div class="lbl">今日待复习</div></div>
+      <div class="stat-badge"><div class="val">${coachPlan.summary?.completion_rate ?? 0}%</div><div class="lbl">今日计划完成率</div></div>
       <div class="stat-badge"><div class="val">${today.sessions || 0}</div><div class="lbl">今日练习次数</div></div>
+      <div class="stat-badge"><div class="val">${today.minutes || 0}</div><div class="lbl">今日学习分钟</div></div>
       <div class="stat-badge"><div class="val">${data.total_study_minutes || 0}</div><div class="lbl">累计学习分钟</div></div>
-      <div class="stat-badge"><div class="val">${data.learning_days || 0}</div><div class="lbl">累计学习天数</div></div>
       <div class="stat-badge"><div class="val">${data.avg_accuracy ?? 0}%</div><div class="lbl">平均正确率</div></div>
     </div>
 
-    ${isNew && !onboardingDone ? renderOnboarding(data, runtime) : ''}
-    ${renderTodayPlan(data, runtime)}
+    ${renderCoachPanel(coachPlan, coach, data)}
     ${renderExamProgress(data)}
-    ${renderRecentActivity(recentSessions)}
+    ${renderRecentActivity(data.recent_sessions || [])}
     ${renderModeCards(data, runtime, counts)}
   `;
 
   el.querySelector('#btn-home-setup')?.addEventListener('click', () => navigate('setup'));
   el.querySelector('#btn-home-license')?.addEventListener('click', () => navigate('license'));
-  el.querySelectorAll('.plan-item[data-page]').forEach(item => {
-    item.addEventListener('click', () => navigate(item.dataset.page));
+  el.querySelectorAll('.plan-item[data-task]').forEach(item => {
+    item.addEventListener('click', () => {
+      const task = parseTask(item.dataset.task);
+      openCoachTask(task);
+    });
+  });
+  el.querySelectorAll('.coach-dismiss[data-event]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await api.post('/api/coach/dismiss', { event_id: btn.dataset.event }).catch(() => {});
+      render(el);
+    });
   });
   el.querySelectorAll('.mode-card[data-page]').forEach(card => {
     card.addEventListener('click', () => navigate(card.dataset.page));
   });
-  el.querySelector('#btn-dismiss-onboarding')?.addEventListener('click', () => {
-    localStorage.setItem('onboarding_done', '1');
-    el.querySelector('#onboarding-guide')?.remove();
-  });
-  el.querySelectorAll('.onboard-step[data-page]').forEach(step => {
-    step.addEventListener('click', () => navigate(step.dataset.page));
-  });
 }
 
-function runtimeLine(runtime) {
-  if (runtime.cloudActive && !runtime.aiReady) {
-    return '当前 Cloud License 记录仍在，但内置 AI 尚未恢复。建议先检查 License 状态，必要时重新激活。';
-  }
-  if (runtime.needsReactivation) {
-    return '当前 Cloud License 记录需要重新激活后，内置 AI 才能恢复稳定可用。';
-  }
-  if (runtime.aiMode === 'cloud') {
-    if (runtime.serverVerified === false) {
-      return '当前使用本地 Cloud License 恢复 AI；最近一次服务器校验未完成，但本地记录仍可工作。';
-    }
-    return '当前优先使用 Cloud 激活后的内置 AI 配置。';
-  }
-  if (runtime.aiMode === 'self_key') {
-    return '当前使用你自己的 API Key。Cloud 激活不会影响本地离线数据。';
-  }
-  if (runtime.versionMode === 'cloud' && runtime.activationAvailable) {
-    return '当前未配置 AI。你可以去 Setup 配置自己的 API Key，或去 License 页面激活 Cloud 许可。';
-  }
-  return '当前未配置 AI，但 Vocabulary / Grammar / Reading / Listening 的离线主路径仍可继续使用。';
-}
-
-function renderTodayPlan(data, runtime) {
-  const counts = data.mode_counts || {};
-  const weakAreas = data.weak_areas || [];
-  const items = [];
-
-  if ((data.srs_due || 0) > 0) {
-    items.push({
-      page: 'vocab',
-      icon: '🃏',
-      title: '先清今天的词汇复习',
-      desc: `还有 ${data.srs_due} 张卡片待复习，这是最稳的今日起点。`,
-    });
-  }
-
-  if (!items.length && (counts.reading || 0) === 0) {
-    items.push({
-      page: 'reading',
-      icon: '📖',
-      title: '做一篇阅读，建立今天的进度',
-      desc: '阅读页支持离线题库与 fallback，不依赖 AI 也能直接开始。',
-    });
-  }
-
-  if (weakAreas.some(item => item.startsWith('grammar'))) {
-    items.push({
-      page: 'grammar',
-      icon: '✏️',
-      title: '补一下语法短板',
-      desc: '你最近的薄弱项集中在语法，适合先做短练习拉回正确率。',
-    });
-  } else if (weakAreas.some(item => item.startsWith('reading'))) {
-    items.push({
-      page: 'reading',
-      icon: '📖',
-      title: '强化阅读理解',
-      desc: '最近阅读相关分项偏弱，建议做一轮定向训练。',
-    });
-  }
-
-  if (!runtime.aiReady) {
-    items.push({
-      page: runtime.versionMode === 'cloud' && runtime.activationAvailable ? 'license' : 'setup',
-      icon: runtime.versionMode === 'cloud' ? '☁' : '⚙️',
-      title: runtime.versionMode === 'cloud' && runtime.activationAvailable ? '补齐 AI 能力' : '配置 AI',
-      desc: runtime.versionMode === 'cloud' && runtime.activationAvailable
-        ? '激活 Cloud License 或配置自带 Key 后，Chat / 写作 / 口语反馈会更完整。'
-        : '配置自带 Key 后可启用 Chat、写作反馈和口语评分。',
-    });
-  } else if ((counts.writing || 0) === 0) {
-    items.push({
-      page: 'writing',
-      icon: '📝',
-      title: '完成一次带反馈的写作',
-      desc: '你当前 AI 已就绪，建议利用反馈闭环积累可见成果。',
-    });
-  }
-
-  if (!items.length) {
-    items.push({
-      page: 'practice',
-      icon: '🎯',
-      title: '进入专项训练',
-      desc: '今天的基础任务已清完，可以按考试题型做更有针对性的练习。',
-    });
-  }
+function renderCoachPanel(plan, coach, data) {
+  const tasks = plan.tasks || [];
+  const summary = plan.summary || {};
+  const recentNotifications = coach.recent_notifications || [];
+  const nextNotification = coach.next_notification;
 
   return `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin:18px 0 12px">
-      <h2 style="margin:0">今天该做什么</h2>
-      <span style="font-size:12px;color:var(--text-dim)">系统基于你的进度自动建议</span>
-    </div>
-    <div class="daily-loop" style="margin-bottom:24px">
-      ${items.slice(0, 4).map(item => planItem(item.page, item.icon, item.title, item.desc)).join('')}
+    <div class="card" style="margin:18px 0 24px">
+      <div style="display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px">
+        <div>
+          <h2 style="margin:0 0 6px 0">今天该做什么</h2>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.6">${escHtml(summary.if_skip || '系统会根据复习到期、弱项和考试目标给出每天最该做的事。')}</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <span class="tag">完成 ${summary.tasks_done || 0} / ${summary.tasks_total || 0}</span>
+          ${nextNotification ? `<span class="tag">下一次提醒 ${formatShortTime(nextNotification.scheduled_for)}</span>` : '<span class="tag">暂无待发提醒</span>'}
+        </div>
+      </div>
+
+      <div class="daily-loop" style="margin-bottom:14px">
+        ${tasks.length
+          ? tasks.map(task => planItem(task)).join('')
+          : '<div class="alert alert-info">今天还没有生成 coach 计划，先去做一次练习，系统会开始跟踪你的节奏。</div>'}
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
+        <div class="card" style="background:var(--bg2);padding:16px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">做完后能看到什么</div>
+          <div style="font-size:14px;line-height:1.7">${escHtml(summary.result_card || '完成任意一个任务后，这里会显示当天结果感。')}</div>
+        </div>
+        <div class="card" style="background:var(--bg2);padding:16px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">明天为什么还要回来</div>
+          <div style="font-size:14px;line-height:1.7">${escHtml(summary.tomorrow_reason || '明天系统会根据你今天的完成情况自动刷新下一步。')}</div>
+        </div>
+      </div>
+
+      ${coach.catch_up ? `<div class="alert alert-warn" style="margin-bottom:14px">${escHtml(coach.catch_up)}</div>` : ''}
+
+      <div class="card" style="background:var(--bg2);padding:16px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px">
+          <strong>最近提醒</strong>
+          <span style="font-size:12px;color:var(--text-dim)">提醒不会超过必要频率</span>
+        </div>
+        ${recentNotifications.length
+          ? recentNotifications.slice(0, 4).map(item => `
+              <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)">
+                <div>
+                  <div style="font-size:13px;font-weight:600">${escHtml(item.title)}</div>
+                  <div style="font-size:12px;color:var(--text-dim);line-height:1.5">${escHtml(item.body || '')}</div>
+                  <div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escHtml(item.channel)} · ${item.state === 'sent' ? '已发送' : item.state}</div>
+                </div>
+                <button class="btn btn-outline coach-dismiss" data-event="${item.event_id}" style="font-size:12px;padding:3px 10px">隐藏</button>
+              </div>
+            `).join('')
+          : '<div style="font-size:13px;color:var(--text-dim)">提醒中心还没有记录。启用提醒并运行应用后，这里会显示最近的督促记录。</div>'}
+      </div>
     </div>
   `;
 }
@@ -280,12 +237,10 @@ function renderExamProgress(data) {
   const examUpper = examKey.toUpperCase();
   const scores = data.skill_scores || {};
   const counts = data.mode_counts || {};
-
   const vocabTotal = data.srs_total || 0;
   const vocabTargets = { toefl: 570, gre: 500, ielts: 500, cet: 600, general: 300 };
   const vocabTarget = vocabTargets[examKey] || 300;
   const vocabPct = Math.min(100, Math.round(vocabTotal / Math.max(vocabTarget, 1) * 100));
-
   const grammarKeys = Object.keys(scores).filter(k => k.startsWith('grammar'));
   const grammarAvg = grammarKeys.length
     ? Math.round(grammarKeys.reduce((sum, key) => sum + (scores[key] || 0), 0) / grammarKeys.length * 100)
@@ -305,7 +260,7 @@ function renderExamProgress(data) {
         <span class="exam-badge exam-${examKey}">${examUpper}</span>
         <h3 style="margin:0">考试准备进度</h3>
       </div>
-      ${rows.map(row => progressRow(row)).join('')}
+      ${rows.map(progressRow).join('')}
     </div>
   `;
 }
@@ -318,7 +273,7 @@ function renderRecentActivity(recentSessions) {
         <button class="btn btn-outline" onclick="navigate('history')" style="font-size:12px;padding:5px 12px">查看 History</button>
       </div>
       ${recentSessions.length
-        ? recentSessions.map(item => recentRow(item)).join('')
+        ? recentSessions.map(recentRow).join('')
         : '<div style="font-size:13px;color:var(--text-dim)">还没有已完成训练记录。完成任意一次练习后，这里会显示最近成果。</div>'}
     </div>
   `;
@@ -341,35 +296,31 @@ function renderModeCards(data, runtime, counts) {
   return `
     <h2>全部功能</h2>
     <div class="card-grid">
-      ${cards.map(([page, icon, label, desc]) => modeCard(page, icon, label, desc)).join('')}
+      ${cards.map(([page, icon, label, desc]) => `
+        <div class="mode-card" data-page="${page}">
+          <div class="icon">${icon}</div>
+          <div class="label">${label}</div>
+          <div class="desc">${desc}</div>
+        </div>
+      `).join('')}
     </div>
   `;
 }
 
-function renderOnboarding(data, runtime) {
-  const counts = data.mode_counts || {};
-  const steps = [
-    { page: 'vocab', icon: '🃏', label: '加入第一批词汇并完成一次复习', done: (data.srs_total || 0) > 0 },
-    { page: 'grammar', icon: '✏️', label: '完成一次语法练习', done: (counts.grammar || 0) > 0 },
-    { page: 'reading', icon: '📖', label: '完成一篇阅读', done: (counts.reading || 0) > 0 },
-    { page: runtime.aiReady ? 'writing' : 'setup', icon: runtime.aiReady ? '📝' : '⚙️', label: runtime.aiReady ? '做一次带反馈的写作' : '补齐 AI 配置', done: runtime.aiReady ? (counts.writing || 0) > 0 : false, locked: false },
-  ];
-
+function planItem(task) {
   return `
-    <div id="onboarding-guide" class="card" style="margin-bottom:24px;border-color:var(--accent);padding:20px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h3 style="margin:0;color:var(--accent)">新用户建议路径</h3>
-        <button class="btn" id="btn-dismiss-onboarding" style="font-size:12px;padding:3px 10px;background:transparent;color:var(--text-dim)">关闭</button>
+    <div class="plan-item" data-task="${escAttr(JSON.stringify(task))}">
+      <span style="font-size:20px">${categoryIcon(task.category)}</span>
+      <div style="flex:1">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <div style="font-weight:600;font-size:14px">${escHtml(task.title)}</div>
+          <span class="tag">${categoryLabel(task.category)}</span>
+          <span class="tag">${stateLabel(task.state)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-dim);margin-top:4px">${escHtml(task.reason || task.description || '')}</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px">${escHtml(task.risk_text || '')}</div>
       </div>
-      <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px">先跑完这几步，你会更容易看到真实进度与 AI 能力差异。</p>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${steps.map(step => `
-          <div class="onboard-step${step.done ? ' onboard-done' : ''}${step.locked ? ' onboard-locked' : ''}" ${!step.done && !step.locked ? `data-page="${step.page}"` : ''}>
-            <span class="onboard-check">${step.done ? '✓' : step.locked ? '🔒' : '○'}</span>
-            <span>${step.label}</span>
-          </div>
-        `).join('')}
-      </div>
+      <span style="font-size:16px">›</span>
     </div>
   `;
 }
@@ -390,51 +341,96 @@ function progressRow(row) {
 }
 
 function recentRow(item) {
-  const labelMap = {
-    vocab: '词汇',
-    grammar: '语法',
-    reading: '阅读',
-    listening: '听力',
-    writing: '写作',
-    speaking: '口语',
-    chat: 'Chat',
-    mock: 'Mock Exam',
-  };
+  const labelMap = { vocab: '词汇', grammar: '语法', reading: '阅读', listening: '听力', writing: '写作', speaking: '口语', chat: 'Chat', mock: 'Mock Exam' };
   const label = labelMap[item.mode] || item.mode;
   return `
     <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
       <div>
         <div style="font-weight:600">${label}</div>
-        <div style="font-size:12px;color:var(--text-dim)">
-          ${item.items_done || 0} 项 · ${Math.round((item.duration_sec || 0) / 60)} 分钟
-        </div>
+        <div style="font-size:12px;color:var(--text-dim)">${item.items_done || 0} 项 · ${Math.round((item.duration_sec || 0) / 60)} 分钟</div>
       </div>
       <span class="tag">${item.accuracy || 0}%</span>
     </div>
   `;
 }
 
-function planItem(page, icon, label, desc) {
-  return `
-    <div class="plan-item" data-page="${page}">
-      <span style="font-size:20px">${icon}</span>
-      <div style="flex:1">
-        <div style="font-weight:600;font-size:14px">${label}</div>
-        <div style="font-size:12px;color:var(--text-dim)">${desc}</div>
-      </div>
-      <span style="font-size:16px">›</span>
-    </div>
-  `;
+function openCoachTask(task) {
+  if (!task) return;
+  sessionStorage.setItem('coach_task_context', JSON.stringify(task));
+  if (['reading', 'listening', 'writing', 'speaking'].includes(task.route_page)) {
+    sessionStorage.setItem('practice_mode', JSON.stringify({
+      section: task.route_page,
+      type: task.task_type || null,
+      exam: task.exam || 'general',
+      started_at: Date.now(),
+      source: 'coach_plan',
+      task_key: task.task_key || '',
+      category: task.category || '',
+    }));
+    navigate(task.route_page);
+    return;
+  }
+  navigate(task.route_page || 'practice');
 }
 
-function modeCard(page, icon, label, desc) {
-  return `
-    <div class="mode-card" data-page="${page}">
-      <div class="icon">${icon}</div>
-      <div class="label">${label}</div>
-      <div class="desc">${desc}</div>
-    </div>
-  `;
+function parseTask(value) {
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function tierLabel(tier) {
+  return { free: '免费教练', self_key: '自带 Key 教练', premium: '商业版教练' }[tier] || tier;
+}
+
+function stageLabel(stage) {
+  return { core: 'Core 阶段', growth: 'Growth 阶段', sprint: 'Sprint 阶段' }[stage] || stage;
+}
+
+function categoryLabel(category) {
+  return {
+    core: '核心内容',
+    growth: '成长内容',
+    sprint: '冲刺内容',
+    ai_enhanced: 'AI 增强',
+  }[category] || category;
+}
+
+function categoryIcon(category) {
+  return { core: '✅', growth: '📈', sprint: '⏱', ai_enhanced: '🤖' }[category] || '•';
+}
+
+function stateLabel(state) {
+  return { done: '已完成', in_progress: '进行中', pending: '待完成' }[state] || '待完成';
+}
+
+function runtimeLine(runtime) {
+  if (runtime.cloudActive && !runtime.aiReady) {
+    return '当前 Cloud License 记录仍在，但内置 AI 尚未恢复。建议先检查 License 状态，必要时重新激活。';
+  }
+  if (runtime.needsReactivation) {
+    return '当前 Cloud License 记录需要重新激活后，内置 AI 才能恢复稳定可用。';
+  }
+  if (runtime.aiMode === 'cloud') {
+    return runtime.serverVerified === false
+      ? '当前使用本地 Cloud License 恢复 AI；最近一次服务器校验未完成，但本地记录仍可工作。'
+      : '当前优先使用 Cloud 激活后的内置 AI 配置。';
+  }
+  if (runtime.aiMode === 'self_key') {
+    return '当前使用你自己的 API Key。Cloud 激活不会影响本地离线数据。';
+  }
+  if (runtime.versionMode === 'cloud' && runtime.activationAvailable) {
+    return '当前未配置 AI。你可以去 Setup 配置自己的 API Key，或去 License 页面激活 Cloud 许可。';
+  }
+  return '当前未配置 AI，但 Vocabulary / Grammar / Reading / Listening 的离线主路径仍可继续使用。';
+}
+
+function formatShortTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function escAttr(value) {
+  return escHtml(value).replace(/"/g, '&quot;');
 }
 
 function escHtml(value) {

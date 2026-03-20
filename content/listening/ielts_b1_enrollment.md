@@ -4,6 +4,7 @@ topic: university enrollment
 exam: ielts
 content_type: listening
 dialogue_type: conversation
+question_types: form_completion,multiple_choice
 ---
 A: Hello, I'd like to enroll in the evening language courses. Is this the right place?
 B: Yes, you've come to the right office. Which language are you interested in?

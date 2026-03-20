@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
-import random
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from core.coach.recap import build_writing_recap
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/writing", tags=["writing"])
@@ -122,22 +123,105 @@ _TASK_TYPES = {
 }
 
 
+def _recent_task_stats(user_model, user_id: str, mode: str, exam: str, days: int = 7) -> dict[str, dict[str, Any]]:
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = user_model._db.execute(
+        """SELECT content_json, ended_at
+           FROM sessions
+           WHERE user_id=? AND mode=? AND ended_at IS NOT NULL AND ended_at>=?
+           ORDER BY ended_at DESC
+           LIMIT 40""",
+        (user_id, mode, cutoff),
+    ).fetchall()
+    stats: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("exam", "")).lower() != str(exam).lower():
+            continue
+        task_type = str(payload.get("task_type", "")).strip().lower()
+        if not task_type:
+            continue
+        item = stats.setdefault(task_type, {"count": 0, "last_at": row["ended_at"]})
+        item["count"] += 1
+        if row["ended_at"] and str(row["ended_at"]) > str(item["last_at"]):
+            item["last_at"] = row["ended_at"]
+    return stats
+
+
+def _pick_task_type(explicit_task_type: Optional[str], exam_prompts: dict[str, list[str]], task_stats: dict[str, dict[str, Any]]) -> str:
+    if explicit_task_type and explicit_task_type in exam_prompts:
+        return explicit_task_type
+    candidates = list(exam_prompts.keys())
+    if not candidates:
+        return ""
+    ranked = sorted(
+        candidates,
+        key=lambda task: (
+            task_stats.get(task, {}).get("count", 0),
+            task_stats.get(task, {}).get("last_at", ""),
+            task,
+        ),
+    )
+    return ranked[0]
+
+
+def _recent_prompt_texts(user_model, user_id: str, mode: str, exam: str, task_type: str, days: int = 7) -> set[str]:
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = user_model._db.execute(
+        """SELECT content_json
+           FROM sessions
+           WHERE user_id=? AND mode=? AND ended_at IS NOT NULL AND ended_at>=?
+           ORDER BY ended_at DESC
+           LIMIT 20""",
+        (user_id, mode, cutoff),
+    ).fetchall()
+    prompts: set[str] = set()
+    for row in rows:
+        try:
+            payload = json.loads(row["content_json"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("exam", "")).lower() != str(exam).lower():
+            continue
+        if str(payload.get("task_type", "")).lower() != str(task_type).lower():
+            continue
+        prompt = str(payload.get("prompt", "")).strip()
+        if prompt:
+            prompts.add(prompt)
+    return prompts
+
+
+def _rotate_prompt_list(prompts: list[str], recent_prompts: set[str], n: int = 1) -> list[str]:
+    if not prompts:
+        return []
+    fresh = [prompt for prompt in prompts if prompt not in recent_prompts]
+    source = fresh if fresh else prompts
+    offset = datetime.now().toordinal() % len(source)
+    ordered = source[offset:] + source[:offset]
+    return ordered[: min(n, len(ordered))]
+
+
 @router.get("/prompt")
 def get_prompt(exam: Optional[str] = None, task_type: Optional[str] = None):
     kb, srs, user_model, ai, profile = get_components()
     target = exam or (profile.target_exam if profile else "general") or "general"
     exam_prompts = _PROMPTS.get(target, _PROMPTS["general"])
+    task_stats = _recent_task_stats(user_model, profile.user_id, "writing", target) if profile else {}
 
-    # Pick task type
-    if task_type and task_type in exam_prompts:
-        tt = task_type
-    else:
-        tt = list(exam_prompts.keys())[0]
+    tt = _pick_task_type(task_type, exam_prompts, task_stats)
 
     prompts = exam_prompts[tt]
     word_target = _WORD_TARGETS.get(target, {}).get(tt) or _WORD_TARGETS.get(target, {}).get("default", 200)
     scale = _SCORE_SCALES.get(target, _SCORE_SCALES["general"])
     task_types = _TASK_TYPES.get(target, _TASK_TYPES["general"])
+    recent_prompts = _recent_prompt_texts(user_model, profile.user_id, "writing", target, tt) if profile else set()
 
     # Try to get an AI-generated prompt from warehouse first.
     # Important: when task_type is explicitly requested (e.g., tab switching),
@@ -158,7 +242,8 @@ def get_prompt(exam: Optional[str] = None, task_type: Optional[str] = None):
         except Exception:
             pass
 
-    chosen_prompt = ai_prompt if ai_prompt else random.choice(prompts)
+    rotated = _rotate_prompt_list(prompts, recent_prompts, n=1)
+    chosen_prompt = ai_prompt if ai_prompt and ai_prompt not in recent_prompts else (rotated[0] if rotated else prompts[0])
 
     return {
         "prompt": chosen_prompt,
@@ -176,12 +261,14 @@ def get_prompt_pool(exam: Optional[str] = None, task_type: Optional[str] = None,
     kb, srs, user_model, ai, profile = get_components()
     target = exam or (profile.target_exam if profile else "general") or "general"
     exam_prompts = _PROMPTS.get(target, _PROMPTS["general"])
-    tt = task_type if task_type and task_type in exam_prompts else list(exam_prompts.keys())[0]
+    task_stats = _recent_task_stats(user_model, profile.user_id, "writing", target) if profile else {}
+    tt = _pick_task_type(task_type, exam_prompts, task_stats)
     prompts = exam_prompts[tt]
+    recent_prompts = _recent_prompt_texts(user_model, profile.user_id, "writing", target, tt) if profile else set()
     word_target = _WORD_TARGETS.get(target, {}).get(tt) or _WORD_TARGETS.get(target, {}).get("default", 200)
     scale = _SCORE_SCALES.get(target, _SCORE_SCALES["general"])
     task_types = _TASK_TYPES.get(target, _TASK_TYPES["general"])
-    chosen = random.sample(prompts, min(n, len(prompts)))
+    chosen = _rotate_prompt_list(prompts, recent_prompts, n=n)
     return {"prompts": [{"prompt": p, "exam": target, "task_type": tt,
                          "task_types": task_types, "word_target": word_target,
                          "score_max": scale["max"], "score_label": scale["label"]}
@@ -193,6 +280,7 @@ class WriteRequest(BaseModel):
     prompt: str
     exam: Optional[str] = None
     task_type: Optional[str] = None
+    duration_sec: Optional[int] = None
 
 
 @router.post("/submit")
@@ -237,7 +325,29 @@ def submit_essay(req: WriteRequest):
                 user_model.record_answer(profile.user_id, skill_key, val >= max_val * 0.6)
 
             db_sid = user_model.start_session(profile.user_id, "writing")
-            user_model.end_session(db_sid, 0, 1, result.get("overall", 0) / max_val)
+            word_count = len((req.essay or "").split())
+            recap = build_writing_recap(
+                task_type=req.task_type or "",
+                overall=float(result.get("overall", 0) or 0),
+                score_max=float(max_val),
+                word_count=word_count,
+            )
+            user_model.end_session(
+                db_sid,
+                max(0, int(req.duration_sec or 0)),
+                1,
+                result.get("overall", 0) / max_val,
+                content_json=json.dumps({
+                    "exam": exam,
+                    "task_type": req.task_type or "",
+                    "prompt": req.prompt,
+                    "overall": result.get("overall", 0),
+                    "duration_sec": max(0, int(req.duration_sec or 0)),
+                    "word_count": word_count,
+                    "essay_preview": (req.essay or "")[:220],
+                    **recap,
+                }),
+            )
 
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
@@ -313,4 +423,3 @@ def generate_academic_discussion(req: AcademicDiscussionRequest):
         return result
     except Exception as e:
         raise HTTPException(500, f"Generation failed: {e}")
-

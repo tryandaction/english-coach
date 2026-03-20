@@ -4,6 +4,7 @@ topic: health clinic appointment
 exam: ielts
 content_type: listening
 dialogue_type: conversation
+question_types: form_completion,multiple_choice
 ---
 A: Good afternoon. I have an appointment at three o'clock. My name is James Carter.
 B: Good afternoon, Mr. Carter. Let me pull up your file. Yes, I see you're here for a general check-up. Have you filled in the health questionnaire we sent you?

@@ -54,6 +54,7 @@ class UserProfile:
     name: str
     cefr_level: str = "B1"
     target_exam: str = "toefl"       # toefl / gre / ielts / cet / general
+    target_exam_date: str = ""
     stem_domain: str = "physics"     # physics / engineering / cs / general
     daily_new_words: int = 20
     session_minutes: int = 30
@@ -129,7 +130,54 @@ class UserModel:
                 seen_at   TEXT,
                 PRIMARY KEY (user_id, chunk_id)
             );
+
+            CREATE TABLE IF NOT EXISTS coach_settings (
+                user_id               TEXT PRIMARY KEY,
+                preferred_study_time  TEXT DEFAULT '20:00',
+                quiet_hours_json      TEXT DEFAULT '{"start":"22:30","end":"08:00"}',
+                reminder_level        TEXT DEFAULT 'basic',
+                desktop_enabled       INTEGER DEFAULT 1,
+                bark_enabled          INTEGER DEFAULT 0,
+                webhook_enabled       INTEGER DEFAULT 0,
+                bark_key              TEXT DEFAULT '',
+                webhook_url           TEXT DEFAULT '',
+                updated_at            TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS coach_daily_plan (
+                plan_id        TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                plan_date      TEXT NOT NULL,
+                stage          TEXT DEFAULT 'growth',
+                status         TEXT DEFAULT 'planned',
+                plan_json      TEXT,
+                summary_json   TEXT,
+                generated_at   TEXT,
+                completed_at   TEXT,
+                UNIQUE(user_id, plan_date)
+            );
+
+            CREATE TABLE IF NOT EXISTS coach_notification_log (
+                event_id       TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                plan_id        TEXT DEFAULT '',
+                task_key       TEXT DEFAULT '',
+                event_type     TEXT NOT NULL,
+                channel        TEXT NOT NULL,
+                scheduled_for  TEXT NOT NULL,
+                fired_at       TEXT DEFAULT '',
+                state          TEXT DEFAULT 'pending',
+                dedupe_key     TEXT NOT NULL UNIQUE,
+                payload_json   TEXT,
+                created_at     TEXT
+            );
         """)
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_coach_plan_user_date ON coach_daily_plan(user_id, plan_date)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_coach_notification_due ON coach_notification_log(user_id, state, scheduled_for)"
+        )
         self._db.commit()
 
     # ------------------------------------------------------------------
@@ -277,6 +325,7 @@ class UserModel:
         accuracy: float,
         content_json: str | None = None,
     ) -> None:
+        profile = None
         self._db.execute(
             "UPDATE sessions SET duration_sec=?, items_done=?, accuracy=?, ended_at=?, content_json=? "
             "WHERE session_id=?",
@@ -293,6 +342,22 @@ class UserModel:
                 profile.total_study_minutes += duration_sec // 60
                 self._save_profile(profile)
         self._db.commit()
+        try:
+            from core.coach.service import CoachService
+            runtime = {}
+            try:
+                from gui.coach_runtime import build_coach_runtime
+
+                runtime = build_coach_runtime()
+            except Exception:
+                runtime = {}
+
+            if row and profile:
+                service = CoachService(self, profile, runtime)
+                service.sync_daily_plan()
+                service.ensure_notification_schedule()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Seen content tracking (for deduplication)

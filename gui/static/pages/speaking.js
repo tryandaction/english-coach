@@ -23,6 +23,17 @@ const TASKS = {
 let _activePractice = null;
 let _state = null;
 
+function markStartedAt() {
+  if (!_state) return;
+  _state.started_at = Date.now();
+  _store.set(_state);
+}
+
+function elapsedSeconds() {
+  if (!_state?.started_at) return 0;
+  return Math.max(0, Math.round((Date.now() - _state.started_at) / 1000));
+}
+
 export async function render(el) {
   _activePractice = getPracticeContext();
   const saved = _store.get();
@@ -41,6 +52,10 @@ export async function render(el) {
 
   if (saved?.exam && saved?.task_type && saved?.prompt) {
     _state = saved;
+    if (!_state.started_at) {
+      _state.started_at = Date.now();
+      _store.set(_state);
+    }
     renderPromptShell(el, _state);
     return;
   }
@@ -122,6 +137,7 @@ async function loadPrompt(el, exam, taskType) {
     const params = new URLSearchParams({ exam, task_type: taskType });
     const result = await api.get(`/api/speaking/prompt?${params}`);
     _state = { ...result, practice: _activePractice || null };
+    _state.started_at = Date.now();
     _store.set(_state);
     renderPromptShell(el, _state);
   } catch (e) {
@@ -140,6 +156,7 @@ function renderPromptShell(el, state) {
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:14px">
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           ${state.practice ? `<span class="tag" style="border-color:var(--accent);color:var(--accent)">${escHtml(practiceSummaryText(state.practice))}</span>` : ''}
+          ${state.practice?.source === 'coach_plan' && practiceCategoryLabel(state.practice) ? `<span class="tag">${escHtml(practiceCategoryLabel(state.practice))}</span>` : ''}
           <span class="exam-badge exam-${exam}">${String(exam).toUpperCase()}</span>
           <span class="tag">${escHtml(taskLabel)}</span>
           <span class="tag">${state.prep_seconds || 0}s prep</span>
@@ -229,6 +246,7 @@ async function submitResponse(el) {
       exam: _state.exam,
       prompt: _state.prompt,
       sample_response: _state.sample_response || null,
+      duration_sec: elapsedSeconds(),
     });
     renderFeedback(feedback, result);
     _store.clear();
@@ -317,6 +335,15 @@ function practiceSummaryText(practice) {
   const mode = practice.source === 'mock_exam' ? 'Mock Section' : 'Speaking Drill';
   const task = practice.type ? ` · ${String(practice.type).replace(/_/g, ' ')}` : '';
   return `${exam} ${mode}${task}`;
+}
+
+function practiceCategoryLabel(practice) {
+  return {
+    core: '核心内容',
+    growth: '成长内容',
+    sprint: '冲刺内容',
+    ai_enhanced: 'AI 增强',
+  }[practice?.category] || '';
 }
 
 function isMockSection() {

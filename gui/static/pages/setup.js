@@ -4,14 +4,29 @@ function _clearExamCache() {
   ['chat_current', 'writing_current', 'reading_current', 'listening_current'].forEach(k => localStorage.removeItem(k));
 }
 
+function _defaultCoachSettings() {
+  return {
+    preferred_study_time: '20:00',
+    quiet_hours: { start: '22:30', end: '08:00' },
+    reminder_level: 'basic',
+    desktop_enabled: true,
+    bark_enabled: false,
+    webhook_enabled: false,
+    bark_key: '',
+    webhook_url: '',
+  };
+}
+
 export async function render(el) {
   let status = {};
   try { status = await api.get('/api/setup/status'); } catch (e) {}
   const versionMode = status.version_mode || 'opensource';
   let licStatus = {};
+  let coachCfg = { settings: _defaultCoachSettings(), tier: 'free', channel_capabilities: { desktop: true, bark: false, webhook: false } };
   if (versionMode === 'cloud') {
     try { licStatus = await api.get('/api/license/status'); } catch (e) {}
   }
+  try { coachCfg = await api.get('/api/coach/settings'); } catch (e) {}
   const activationAvailable = !!licStatus.activation_available;
   const effectiveAiMode = status.ai_mode || (licStatus.active ? 'cloud' : status.has_self_key ? 'self_key' : 'none');
   const apiHint = effectiveAiMode === 'cloud'
@@ -30,7 +45,7 @@ export async function render(el) {
   const isFirstRun = !status.configured;
 
   if (!isFirstRun) {
-    renderSettings(el, status, licStatus, versionMode);
+    renderSettings(el, status, licStatus, versionMode, coachCfg);
     return;
   }
 
@@ -113,6 +128,11 @@ export async function render(el) {
               <option value="cet"     ${status.target_exam==='cet'    ?'selected':''}>CET-4/6</option>
               <option value="general" ${(!status.target_exam||status.target_exam==='general')?'selected':''}>General English</option>
             </select>
+          </div>
+          <div class="form-group">
+            <label>Target exam date (optional)</label>
+            <input id="inp-exam-date" type="date" value="${status.target_exam_date || ''}">
+            <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Set this only if you want sprint-mode recommendations in the last 30 days.</div>
           </div>
           <button class="btn btn-primary" id="btn-next-1" style="width:100%">Next →</button>
         </div>
@@ -228,6 +248,35 @@ export async function render(el) {
               <option value="en-GB-RyanNeural">Ryan (UK Male)</option>
               <option value="en-AU-NatashaNeural">Natasha (AU Female)</option>
             </select>
+          </div>
+          <div class="form-group">
+            <label>Coach reminder level</label>
+            <select id="inp-reminder-level" style="width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px">
+              <option value="off" ${coachCfg.settings?.reminder_level === 'off' ? 'selected' : ''}>Off</option>
+              <option value="basic" ${(!coachCfg.settings?.reminder_level || coachCfg.settings?.reminder_level === 'basic') ? 'selected' : ''}>Basic</option>
+              <option value="coach" ${coachCfg.settings?.reminder_level === 'coach' ? 'selected' : ''}>Coach</option>
+            </select>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group">
+              <label>Preferred study time</label>
+              <input id="inp-study-time" type="time" value="${coachCfg.settings?.preferred_study_time || '20:00'}">
+            </div>
+            <div class="form-group">
+              <label>Quiet hours start</label>
+              <input id="inp-quiet-start" type="time" value="${coachCfg.settings?.quiet_hours?.start || '22:30'}">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Quiet hours end</label>
+            <input id="inp-quiet-end" type="time" value="${coachCfg.settings?.quiet_hours?.end || '08:00'}">
+          </div>
+          <div class="form-group">
+            <label>Desktop reminder</label>
+            <label style="display:flex;gap:8px;align-items:center;font-size:13px">
+              <input id="inp-desktop-enabled" type="checkbox" ${coachCfg.settings?.desktop_enabled !== false ? 'checked' : ''}>
+              Enable local desktop reminder
+            </label>
           </div>
           <div id="pref-msg"></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
@@ -381,11 +430,25 @@ export async function render(el) {
       await api.post('/api/setup', {
         name:        el.querySelector('#inp-name').value.trim() || 'User',
         target_exam: el.querySelector('#inp-exam').value,
+        target_exam_date: el.querySelector('#inp-exam-date')?.value || '',
         backend:     el.querySelector('#inp-backend').value,
         api_key:     el.querySelector('#inp-apikey').value.trim(),
         content_path: '',
         data_dir:    el.querySelector('#inp-datadir')?.value.trim() || 'data',
       });
+      await api.post('/api/coach/settings', {
+        preferred_study_time: el.querySelector('#inp-study-time')?.value || '20:00',
+        quiet_hours: {
+          start: el.querySelector('#inp-quiet-start')?.value || '22:30',
+          end: el.querySelector('#inp-quiet-end')?.value || '08:00',
+        },
+        reminder_level: el.querySelector('#inp-reminder-level')?.value || 'basic',
+        desktop_enabled: !!el.querySelector('#inp-desktop-enabled')?.checked,
+        bark_enabled: !!el.querySelector('#inp-bark-enabled')?.checked,
+        webhook_enabled: !!el.querySelector('#inp-webhook-enabled')?.checked,
+        bark_key: el.querySelector('#inp-bark-key')?.value || '',
+        webhook_url: el.querySelector('#inp-webhook-url')?.value || '',
+      }).catch(() => {});
       _clearExamCache();
       setStep(5);
     } catch (e) {
@@ -398,7 +461,7 @@ export async function render(el) {
 }
 
 // ── Returning-user settings panel ─────────────────────────────────────────
-function renderSettings(el, status, licStatus, versionMode) {
+function renderSettings(el, status, licStatus, versionMode, coachCfg) {
   const licTag = licStatus.active
     ? `<span class="tag tag-green">☁ Cloud ${licStatus.days_left}d</span>`
     : licStatus.needs_reactivation
@@ -442,6 +505,10 @@ function renderSettings(el, status, licStatus, versionMode) {
               <option value="general" ${(!status.target_exam||status.target_exam==='general')?'selected':''}>General English</option>
             </select>
           </div>
+          <div class="form-group" style="margin-top:12px;margin-bottom:0">
+            <label>Target exam date (optional)</label>
+            <input id="inp-exam-date" type="date" value="${status.target_exam_date || ''}">
+          </div>
         </div>
       </div>
 
@@ -476,6 +543,66 @@ function renderSettings(el, status, licStatus, versionMode) {
             <input id="inp-apikey" type="password" placeholder="${apiPlaceholder}">
             <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Stored locally in .env — never uploaded</div>
           </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-section-title">Coach Reminders</div>
+        <div class="card">
+          <div class="form-group">
+            <label>Reminder level</label>
+            <select id="inp-reminder-level">
+              <option value="off" ${coachCfg.settings?.reminder_level === 'off' ? 'selected' : ''}>Off</option>
+              <option value="basic" ${(!coachCfg.settings?.reminder_level || coachCfg.settings?.reminder_level === 'basic') ? 'selected' : ''}>Basic</option>
+              <option value="coach" ${coachCfg.settings?.reminder_level === 'coach' ? 'selected' : ''}>Coach</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <span class="settings-row-label">Preferred study time</span>
+            <input id="inp-study-time" type="time" value="${coachCfg.settings?.preferred_study_time || '20:00'}"
+              style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
+          </div>
+          <hr class="divider" style="margin:12px 0">
+          <div class="settings-row">
+            <span class="settings-row-label">Quiet hours start</span>
+            <input id="inp-quiet-start" type="time" value="${coachCfg.settings?.quiet_hours?.start || '22:30'}"
+              style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
+          </div>
+          <hr class="divider" style="margin:12px 0">
+          <div class="settings-row">
+            <span class="settings-row-label">Quiet hours end</span>
+            <input id="inp-quiet-end" type="time" value="${coachCfg.settings?.quiet_hours?.end || '08:00'}"
+              style="background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
+          </div>
+          <hr class="divider" style="margin:12px 0">
+          <label style="display:flex;gap:8px;align-items:center;font-size:13px">
+            <input id="inp-desktop-enabled" type="checkbox" ${coachCfg.settings?.desktop_enabled !== false ? 'checked' : ''}>
+            Enable local desktop reminders
+          </label>
+          <div style="margin-top:10px">
+            <button class="btn btn-outline" id="btn-test-reminder" style="font-size:12px;padding:5px 12px">发送测试提醒</button>
+          </div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:8px">
+            ${coachCfg.channel_capabilities?.bark ? '商业版可启用 Bark / Webhook 外部触达。' : '外部触达仅对商业版开放；当前仍可使用本地提醒。'}
+          </div>
+          <hr class="divider" style="margin:12px 0">
+          <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:8px">
+            <input id="inp-bark-enabled" type="checkbox" ${coachCfg.settings?.bark_enabled ? 'checked' : ''} ${coachCfg.channel_capabilities?.bark ? '' : 'disabled'}>
+            Enable Bark push
+          </label>
+          <input id="inp-bark-key" type="text" placeholder="Bark device key or full URL"
+            value="${coachCfg.settings?.bark_key || ''}"
+            ${coachCfg.channel_capabilities?.bark ? '' : 'disabled'}
+            style="width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
+          <hr class="divider" style="margin:12px 0">
+          <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-bottom:8px">
+            <input id="inp-webhook-enabled" type="checkbox" ${coachCfg.settings?.webhook_enabled ? 'checked' : ''} ${coachCfg.channel_capabilities?.webhook ? '' : 'disabled'}>
+            Enable Webhook
+          </label>
+          <input id="inp-webhook-url" type="text" placeholder="https://your-webhook-url"
+            value="${coachCfg.settings?.webhook_url || ''}"
+            ${coachCfg.channel_capabilities?.webhook ? '' : 'disabled'}
+            style="width:100%;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:13px">
         </div>
       </div>
 
@@ -567,6 +694,17 @@ function renderSettings(el, status, licStatus, versionMode) {
   el.querySelector('#btn-tts-test').addEventListener('click', () => {
     window.tts && window.tts('The quick brown fox jumps over the lazy dog.');
   });
+  el.querySelector('#btn-test-reminder')?.addEventListener('click', async () => {
+    const msg = el.querySelector('#save-msg');
+    try {
+      const r = await api.post('/api/coach/test-reminder', {});
+      const count = (r.dispatched || []).length;
+      msg.innerHTML = `<div class="alert alert-success">✓ 已触发 ${count} 条测试提醒</div>`;
+      setTimeout(() => { msg.innerHTML = ''; }, 3000);
+    } catch (e) {
+      msg.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    }
+  });
 
   el.querySelector('#btn-save').addEventListener('click', async () => {
     const btn = el.querySelector('#btn-save');
@@ -576,12 +714,26 @@ function renderSettings(el, status, licStatus, versionMode) {
       await api.post('/api/setup', {
         name: el.querySelector('#inp-name').value.trim() || 'User',
         target_exam: el.querySelector('#inp-exam').value,
+        target_exam_date: el.querySelector('#inp-exam-date')?.value || '',
         backend: el.querySelector('#inp-backend').value,
         api_key: el.querySelector('#inp-apikey').value.trim(),
         content_path: '',
         history_retention_days: parseInt(el.querySelector('#inp-retention').value) || 30,
         data_dir: el.querySelector('#inp-datadir').value.trim(),
       });
+      await api.post('/api/coach/settings', {
+        preferred_study_time: el.querySelector('#inp-study-time')?.value || '20:00',
+        quiet_hours: {
+          start: el.querySelector('#inp-quiet-start')?.value || '22:30',
+          end: el.querySelector('#inp-quiet-end')?.value || '08:00',
+        },
+        reminder_level: el.querySelector('#inp-reminder-level')?.value || 'basic',
+        desktop_enabled: !!el.querySelector('#inp-desktop-enabled')?.checked,
+        bark_enabled: !!el.querySelector('#inp-bark-enabled')?.checked,
+        webhook_enabled: !!el.querySelector('#inp-webhook-enabled')?.checked,
+        bark_key: el.querySelector('#inp-bark-key')?.value || '',
+        webhook_url: el.querySelector('#inp-webhook-url')?.value || '',
+      }).catch(() => {});
       _clearExamCache();
       msg.innerHTML = '<div class="alert alert-success">✓ Settings saved</div>';
       setTimeout(() => { msg.innerHTML = ''; }, 3000);

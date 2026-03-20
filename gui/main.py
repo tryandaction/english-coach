@@ -3,6 +3,7 @@ Entry point for the GUI — starts FastAPI on a background thread, opens PyWebVi
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 
 # Static imports for PyInstaller compatibility
 # NOTE: uvicorn imported dynamically to avoid Python 3.13 type annotation issues
+from gui.coach_runtime import start_coach_scheduler
 from gui.server import create_app
 
 # Ensure project root is on sys.path when running as exe
@@ -28,6 +30,23 @@ def _log(msg: str) -> None:
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except Exception:
         pass
+
+
+def _env_flag(name: str) -> bool:
+    value = str(os.environ.get(name, "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _write_probe_file(path: str, payload: dict[str, object]) -> None:
+    if not path:
+        return
+    try:
+        probe_path = Path(path)
+        probe_path.parent.mkdir(parents=True, exist_ok=True)
+        probe_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _log(f"Wrote probe file: {probe_path}")
+    except Exception as e:
+        _log(f"Failed to write probe file {path}: {type(e).__name__}: {e}")
 
 _LOADING_HTML = """<!DOCTYPE html>
 <html>
@@ -127,6 +146,7 @@ def _start_server(port: int) -> None:
             port=port,
             log_level="error",  # Only show errors
             access_log=False,
+            log_config=None,
             timeout_keep_alive=5,
             limit_concurrency=100,
             backlog=100
@@ -172,7 +192,12 @@ def main() -> None:
     _log("=" * 60)
 
     import urllib.request
-    import webview
+
+    no_webview = _env_flag("ENGLISH_COACH_NO_WEBVIEW")
+    ready_file = str(os.environ.get("ENGLISH_COACH_READY_FILE", "") or "").strip()
+    _log(f"Smoke mode: {'enabled' if no_webview else 'disabled'}")
+    if ready_file:
+        _log(f"Ready file configured: {ready_file}")
 
     # Find a free port
     _log("Finding free port...")
@@ -181,7 +206,19 @@ def main() -> None:
         _log(f"Selected port: {port}")
     except Exception as e:
         _log(f"CRITICAL ERROR finding port: {e}")
+        if no_webview:
+            _write_probe_file(
+                ready_file,
+                {
+                    "status": "failed",
+                    "stage": "port_selection",
+                    "error": str(e),
+                    "log_path": _LOG,
+                },
+            )
+            raise SystemExit(1)
         # Show error and exit
+        import webview
         error_html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">
@@ -211,6 +248,12 @@ def main() -> None:
     server_thread.start()
     _log("Server thread started")
 
+    try:
+        start_coach_scheduler()
+        _log("Coach scheduler started")
+    except Exception as e:
+        _log(f"Coach scheduler failed to start: {type(e).__name__}: {e}")
+
     # Wait for server to be ready
     health_url = f"http://127.0.0.1:{port}/health"
     app_url = f"http://127.0.0.1:{port}/"
@@ -239,8 +282,22 @@ def main() -> None:
     if not server_ready:
         _log("✗ ERROR: Server failed to start after 30 seconds")
         _log(f"Check log file for details: {_LOG}")
+        if no_webview:
+            _write_probe_file(
+                ready_file,
+                {
+                    "status": "failed",
+                    "stage": "server_startup",
+                    "port": port,
+                    "health_url": health_url,
+                    "url": app_url,
+                    "log_path": _LOG,
+                },
+            )
+            raise SystemExit(1)
 
         # Show detailed error window
+        import webview
         error_html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">
@@ -286,9 +343,32 @@ def main() -> None:
         webview.start()
         return
 
+    _write_probe_file(
+        ready_file,
+        {
+            "status": "ready",
+            "port": port,
+            "health_url": health_url,
+            "url": app_url,
+            "log_path": _LOG,
+            "pid": os.getpid(),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+
+    if no_webview:
+        _log("Smoke mode active; skipping WebView and keeping process alive")
+        try:
+            while server_thread.is_alive():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            _log("Smoke mode interrupted")
+        return
+
     # Server is ready, create main window
     _log("Creating main window...")
     try:
+        import webview
         webview.create_window(
             "English Coach",
             url=app_url,

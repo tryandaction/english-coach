@@ -16,6 +16,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from core.coach.recap import build_reading_recap
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/reading", tags=["reading"])
@@ -855,8 +856,12 @@ class ReadingSession:
     passage: str
     chunk_id: str
     questions: list
+    exam: str = ""
+    topic: str = ""
+    requested_question_types: list[str] = field(default_factory=list)
     answered: int = 0
     correct: int = 0
+    completed: bool = False
     start_time: float = field(default_factory=time.time)
 
 
@@ -887,6 +892,7 @@ def start_session(exam: Optional[str] = None):
             session_id=sid, user_id=profile.user_id,
             db_session_id=db_sid, passage=passage_text,
             chunk_id=chunk_id, questions=questions,
+            exam=target_exam, topic=pooled.get("topic", ""),
         )
         _schedule_replenish(target_exam, cefr)
         payload = _build_session_payload(
@@ -974,6 +980,8 @@ def start_session(exam: Optional[str] = None):
             passage=passage_text,
             chunk_id=chunk_id,
             questions=questions,
+            exam=target_exam,
+            topic=gen["topic"],
         )
         _schedule_replenish(target_exam, cefr)
         payload = _build_session_payload(
@@ -1053,6 +1061,8 @@ def start_session(exam: Optional[str] = None):
         passage=passage_text,
         chunk_id=chunk_id,
         questions=questions,
+        exam=target_exam,
+        topic=gen.get("topic", passage.topic) if ai_generated else passage.topic,
     )
 
     _schedule_replenish(target_exam, cefr)
@@ -1103,12 +1113,40 @@ def submit_answer(session_id: str, req: AnswerRequest):
         sess.correct += 1
 
     last = req.question_index >= len(sess.questions) - 1
-    if last:
+    if last and not sess.completed:
         kb, srs, user_model, ai, profile = get_components()
         duration = int(time.time() - sess.start_time)
         accuracy = sess.correct / max(sess.answered, 1)
+        actual_question_types = _actual_question_types(sess.questions)
+        recap = build_reading_recap(
+            topic=sess.topic,
+            correct=sess.correct,
+            answered=sess.answered,
+            requested_question_types=sess.requested_question_types,
+            actual_question_types=actual_question_types,
+        )
         user_model.record_answer(sess.user_id, "reading_comprehension", accuracy >= 0.67)
-        user_model.end_session(sess.db_session_id, duration, sess.answered, accuracy)
+        user_model.end_session(
+            sess.db_session_id,
+            duration,
+            sess.answered,
+            accuracy,
+            content_json=json.dumps(
+                {
+                    "exam": sess.exam,
+                    "topic": sess.topic,
+                    "chunk_id": sess.chunk_id,
+                    "question_types": sess.requested_question_types or actual_question_types,
+                    "requested_question_types": sess.requested_question_types,
+                    "correct": sess.correct,
+                    "answered": sess.answered,
+                    "passage_preview": sess.passage[:220],
+                    **recap,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        sess.completed = True
 
     return {
         "correct": correct,
@@ -1512,6 +1550,9 @@ def start_filtered_session(req: FilteredPracticeRequest):
         passage=passage_text,
         chunk_id=chunk_id,
         questions=questions,
+        exam=req.exam,
+        topic=passage_topic,
+        requested_question_types=req.question_types or [],
     )
 
     payload = _build_session_payload(

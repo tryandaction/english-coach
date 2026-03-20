@@ -4,6 +4,7 @@ topic: campus event planning
 exam: toefl
 content_type: listening
 dialogue_type: conversation
+question_types: detail
 ---
 A: Hi, I'm calling about the international culture festival next month. I'm the student coordinator. Is this the events office?
 B: Yes, it is. How can I help you?

@@ -4,6 +4,7 @@ topic: biology lecture excerpt
 exam: toefl
 content_type: listening
 dialogue_type: monologue
+question_types: organization,detail
 ---
 A: Today we're going to talk about a fascinating phenomenon in evolutionary biology — convergent evolution. This is when unrelated species independently evolve similar traits as a result of adapting to similar environments or ecological niches.
 A: A classic example is the wing. Bats, birds, and insects all have wings, but if you look at the underlying anatomy, they're completely different structures. Birds have hollow bones and feathers. Bats have elongated finger bones with a membrane stretched between them. Insects have an entirely different mechanism involving the exoskeleton.

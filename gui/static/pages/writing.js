@@ -34,6 +34,11 @@ const _pool = {
 let _state = null; // {exam, task_types, tasks: {task1: {prompt, ...}, task2: {prompt, ...}}, current_task}
 let _activePractice = null;
 
+function elapsedSeconds() {
+  if (!_state?.started_at) return 0;
+  return Math.max(0, Math.round((Date.now() - _state.started_at) / 1000));
+}
+
 export async function render(el) {
   _activePractice = getPracticeContext();
 
@@ -53,6 +58,10 @@ export async function render(el) {
   const saved = _store.get();
   if (saved && saved.tasks) {
     _state = saved;
+    if (!_state.started_at) {
+      _state.started_at = Date.now();
+      _store.set(_state);
+    }
     _activePractice = saved.practice || null;
     renderEditor(el, _state);
     return;
@@ -77,6 +86,7 @@ async function loadAllPrompts(el, context = _activePractice) {
     if (!task_types || task_types.length <= 1) {
       // Single task type - use old behavior
       _state = { ...r1, current_task: preferredTask, practice: context || null };
+      _state.started_at = Date.now();
       _store.set(_state);
       renderEditor(el, _state);
       return;
@@ -110,6 +120,7 @@ async function loadAllPrompts(el, context = _activePractice) {
       tasks,
       current_task: preferredTask,
       practice: context || null,
+      started_at: Date.now(),
     };
     _store.set(_state);
     renderEditor(el, _state);
@@ -140,6 +151,7 @@ async function loadPrompt(el, task_type) {
     const r = await api.get('/api/writing/prompt' + (params ? `?${params}` : ''));
     _state = { ...r, practice: _activePractice || _state?.practice || null };
     _state.current_task = r.task_type;
+    _state.started_at = Date.now();
     _store.set(_state);
     renderEditor(el, _state);
   } catch (e) {
@@ -200,6 +212,7 @@ function renderEditor(el, state) {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
         <div style="display:flex;align-items:center;gap:8px">
           ${practice ? `<span class="tag" style="border-color:var(--accent);color:var(--accent)">${escHtml(practiceSummaryText(practice))}</span>` : ''}
+          ${practice?.source === 'coach_plan' && practiceCategoryLabel(practice) ? `<span class="tag">${escHtml(practiceCategoryLabel(practice))}</span>` : ''}
           <span class="exam-badge exam-${exam || 'general'}">${examUpper}</span>
           ${current_task ? `<span style="font-size:12px;color:var(--text-dim)">${_taskLabel(task_types, current_task)}</span>` : ''}
         </div>
@@ -228,6 +241,7 @@ function renderEditor(el, state) {
       if (state.tasks) {
         // New format: switch to different task
         _state.current_task = btn.dataset.tt;
+        _state.started_at = Date.now();
         _store.set(_state);
         renderEditor(el, _state);
       } else {
@@ -290,7 +304,7 @@ async function streamFeedback(el, essay, prompt, exam, task_type, score_max, sco
   let overallScore = null;
 
   try {
-    await api.stream('/api/writing/submit', { essay, prompt, exam, task_type }, (type, data) => {
+    await api.stream('/api/writing/submit', { essay, prompt, exam, task_type, duration_sec: elapsedSeconds() }, (type, data) => {
       if (type === 'scores') {
         Object.assign(scores, data);
         renderScores(stream, scores, score_max);
@@ -452,6 +466,15 @@ function practiceSummaryText(practice) {
   const mode = practice.source === 'mock_exam' ? 'Mock Section' : 'Writing Drill';
   const task = practice.type ? ` · ${String(practice.type).replace(/_/g, ' ')}` : '';
   return `${exam} ${mode}${task}`;
+}
+
+function practiceCategoryLabel(practice) {
+  return {
+    core: '核心内容',
+    growth: '成长内容',
+    sprint: '冲刺内容',
+    ai_enhanced: 'AI 增强',
+  }[practice?.category] || '';
 }
 
 function isMockSection() {

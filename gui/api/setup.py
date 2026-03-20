@@ -18,6 +18,7 @@ class SetupRequest(BaseModel):
     backend: str = "deepseek"
     api_key: str = ""
     target_exam: str = "toefl"
+    target_exam_date: str = ""
     content_path: str = ""
     history_retention_days: int = 30
     data_dir: str = ""
@@ -85,11 +86,13 @@ def setup_status():
     cfg = load_config()
     version_mode = get_version_mode()
     has_profile = False
+    profile = None
     data_dir = _resolve_data_dir(cfg)
     try:
         from core.user_model.profile import UserModel
         um = UserModel(data_dir / "user.db")
-        has_profile = um.get_first_profile() is not None
+        profile = um.get_first_profile()
+        has_profile = profile is not None
     except Exception:
         pass
 
@@ -129,8 +132,9 @@ def setup_status():
         "license_days_left": int(runtime["days_left"] or 0),
         "self_key_backend": runtime["self_key_backend"],
         "license_error": runtime.get("error", ""),
-        "target_exam": cfg.get("user", {}).get("target_exam", ""),
-        "name": cfg.get("user", {}).get("name", ""),
+        "target_exam": getattr(profile, "target_exam", "") or cfg.get("user", {}).get("target_exam", ""),
+        "target_exam_date": getattr(profile, "target_exam_date", "") or cfg.get("user", {}).get("target_exam_date", ""),
+        "name": getattr(profile, "name", "") or cfg.get("user", {}).get("name", ""),
         "history_retention_days": int(cfg.get("history_retention_days", 30)),
         "data_dir": cfg.get("data_dir", "data"),
     }
@@ -142,6 +146,7 @@ def run_setup(req: SetupRequest):
     cfg.setdefault("user", {})
     cfg["user"]["name"] = req.name
     cfg["user"]["target_exam"] = req.target_exam
+    cfg["user"]["target_exam_date"] = req.target_exam_date
     cfg["backend"] = req.backend
     cfg["history_retention_days"] = req.history_retention_days
 
@@ -173,7 +178,12 @@ def run_setup(req: SetupRequest):
     um = UserModel(data_dir / "user.db")
     existing = um.get_first_profile()
     if not existing:
-        um.create_profile(name=req.name, target_exam=req.target_exam)
+        um.create_profile(name=req.name, target_exam=req.target_exam, target_exam_date=req.target_exam_date)
+    else:
+        existing.name = req.name
+        existing.target_exam = req.target_exam
+        existing.target_exam_date = req.target_exam_date
+        um.update_profile(existing)
 
     reset_components()
     return {"ok": True}
