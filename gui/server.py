@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -17,8 +18,8 @@ async def _lifespan(app: FastAPI):
         from gui.api.reading import seed_pool_on_startup as seed_reading_pool
         from gui.api.listening import seed_pool_on_startup as seed_listening_pool
 
-        await seed_reading_pool()
-        await seed_listening_pool()
+        asyncio.create_task(seed_reading_pool())
+        asyncio.create_task(seed_listening_pool())
     except Exception:
         pass
     yield  # Server runs here
