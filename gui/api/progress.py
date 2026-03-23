@@ -96,7 +96,7 @@ def get_progress():
         """SELECT date(started_at) as day, COUNT(*) as sessions,
                   SUM(items_done) as items, AVG(accuracy) as acc
            FROM sessions WHERE user_id=?
-           AND started_at >= date('now','-14 days')
+           AND date(started_at) >= date('now','localtime','-14 days')
            GROUP BY day ORDER BY day""",
         (profile.user_id,),
     ).fetchall()
@@ -139,7 +139,7 @@ def get_progress():
                   COALESCE(SUM(duration_sec), 0) AS duration_sec,
                   COALESCE(SUM(items_done), 0) AS items_done
            FROM sessions
-           WHERE user_id=? AND date(COALESCE(ended_at, started_at)) = date('now')""",
+           WHERE user_id=? AND date(COALESCE(ended_at, started_at)) = date('now','localtime')""",
         (profile.user_id,),
     ).fetchone()
     learning_days = user_model._db.execute(

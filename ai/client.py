@@ -154,6 +154,7 @@ class AIClient:
         cefr_level: str,
         exam: str = "general",
         topic: str = "",
+        min_words: int | None = None,
     ) -> dict:
         """
         Generate a reading passage when no KB content is available.
@@ -171,7 +172,8 @@ class AIClient:
         if not topic:
             topic = random.choice(_topics.get(exam, _topics["general"]))
 
-        cache_key = self._key(f"passage|{cefr_level}|{exam}|{topic}")
+        target_min_words = max(int(min_words or 0), 0)
+        cache_key = self._key(f"passage|{cefr_level}|{exam}|{topic}|{target_min_words}")
         cached = self._get_cache(cache_key)
         if cached:
             import json as _j
@@ -185,6 +187,8 @@ class AIClient:
             "cet": {"A1": 120, "A2": 160, "B1": 240, "B2": 320, "C1": 380, "C2": 420},
         }
         words = exam_targets.get(exam, default_targets).get(cefr_level, default_targets.get(cefr_level, 200))
+        words = max(words, target_min_words)
+        min_required = target_min_words or max(120, int(words * 0.85))
         style_hint = {
             "toefl": "Use an academic expository style similar to a TOEFL reading passage, with 6-8 coherent paragraphs and clear development of ideas.",
             "ielts": "Use an IELTS Academic reading style with substantial detail, 6-8 coherent paragraphs, and a neutral informative tone.",
@@ -196,10 +200,20 @@ class AIClient:
         prompt = (
             f"Write one reading passage about '{topic}' for a {cefr_level} English learner "
             f"preparing for {exam.upper()}. Target length: about {words} words. "
+            f"It must be at least {min_required} words long. "
             f"{style_hint} Use vocabulary and sentence complexity appropriate for {cefr_level}. "
             f"Do not add a title, bullets, questions, markdown, or explanations. Return only the passage text."
         )
-        passage = self._call(prompt, model=self._default_model, max_tokens=600).strip()
+        max_tokens = max(700, min(2200, int(words * 2.2)))
+        passage = self._call(prompt, model=self._default_model, max_tokens=max_tokens).strip()
+        if len(passage.split()) < min_required:
+            expand_prompt = (
+                f"The passage below is too short. Rewrite and expand it to at least {min_required} words, "
+                f"keeping the same topic and academic style for {exam.upper()} preparation. "
+                f"Do not add a title, bullets, questions, markdown, or explanations. Return only the passage text.\n\n"
+                f"{passage}"
+            )
+            passage = self._call(expand_prompt, model=self._default_model, max_tokens=max_tokens).strip()
 
         result = {"passage": passage, "topic": topic, "difficulty": cefr_level, "word_count": len(passage.split())}
         import json as _j

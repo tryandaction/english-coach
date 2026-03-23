@@ -363,7 +363,9 @@ async function startLibraryPassage(el, chunkId) {
 
 async function startSession(el, options = {}) {
   const body = el.querySelector('#reading-body');
-  body.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div></div>';
+  body.innerHTML = _activePractice?.source === 'mock_exam'
+    ? '<div style="text-align:center;padding:40px"><div class="spinner"></div><div style="margin-top:12px;color:var(--text-dim)">Preparing a longer mock passage...</div></div>'
+    : '<div style="text-align:center;padding:40px"><div class="spinner"></div></div>';
 
   try {
     let result;

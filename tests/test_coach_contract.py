@@ -305,6 +305,37 @@ class CoachServiceContractTests(unittest.TestCase):
             srs._db.close()
             tmpdir.cleanup()
 
+    def test_mock_reading_prefers_long_offline_passage_with_question_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir)
+            kb = KnowledgeBase(data_dir)
+            chunks = IngestionPipeline().ingest_directory(Path("content/reading"))
+            kb.add_chunks(chunks)
+            db_path = str(data_dir / "user.db")
+            srs = SM2Engine(db_path)
+            user_model = UserModel(db_path)
+            profile = user_model.create_profile(name="Mock Reader", target_exam="toefl")
+            profile.cefr_level = "B1"
+            user_model.update_profile(profile)
+            components = (kb, srs, user_model, None, profile)
+            try:
+                with patch("gui.api.reading.get_components", return_value=components):
+                    result = start_filtered_session(
+                        FilteredPracticeRequest(
+                            exam="toefl",
+                            practice_mode="mock",
+                        )
+                    )
+                self.assertGreaterEqual(result["word_count"], 650)
+                self.assertGreaterEqual(result["question_count"], 10)
+                self.assertEqual(result["difficulty"], "B2")
+                self.assertNotIn("AI 长篇文章", str(result.get("fallback_reason", "")))
+            finally:
+                reading_sessions.clear()
+                user_model._db.close()
+                srs._db.close()
+                kb._sql.close()
+
 
 class BuiltinVocabVisibilityTests(unittest.TestCase):
     def test_open_source_vocab_files_are_no_longer_hidden(self) -> None:

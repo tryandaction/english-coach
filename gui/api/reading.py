@@ -61,6 +61,7 @@ class PassageRecord:
     difficulty_score: int
     source_quality: str
     ai_generated: bool = False
+    mock_exam_ready: bool = False
 
 
 def _json_object(value) -> dict:
@@ -216,6 +217,7 @@ def _build_passage_record(kb, row) -> Optional[PassageRecord]:
         difficulty_score=max(difficulty_candidates or [0]),
         source_quality=source_quality,
         ai_generated=ai_generated,
+        mock_exam_ready=bool(metadata.get("mock_exam_ready")),
     )
 
 
@@ -330,10 +332,17 @@ READING_FILTER_OPTIONS = {
 
 _PASSAGE_MIN_WORDS = {
     "toefl": 650,
-    "ielts": 800,
+    "ielts": 700,
     "gre": 350,
     "cet": 240,
     "general": 180,
+}
+
+_CEFR_ORDER = {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "C1": 5, "C2": 6}
+
+_MOCK_READING_TARGETS = {
+    "toefl": {"cefr_floor": "B2", "min_words": 650, "question_count": 10},
+    "ielts": {"cefr_floor": "B2", "min_words": 700, "question_count": 10},
 }
 
 
@@ -343,6 +352,46 @@ def _min_passage_words(exam: str) -> int:
 
 def _needs_ai_passage_upgrade(exam: str, word_count: int) -> bool:
     return word_count > 0 and word_count < _min_passage_words(exam)
+
+
+def _cefr_floor(level: str, floor: str) -> str:
+    normalized = str(level or "").upper().strip() or floor
+    return normalized if _CEFR_ORDER.get(normalized, 0) >= _CEFR_ORDER.get(floor, 0) else floor
+
+
+def _mock_target(exam: str) -> dict:
+    exam_key = str(exam or "").lower()
+    return dict(_MOCK_READING_TARGETS.get(exam_key, {"cefr_floor": "B2", "min_words": _min_passage_words(exam_key), "question_count": 10}))
+
+
+def _question_target(exam: str, practice_mode: str, requested_question_types: Optional[list[str]] = None) -> int:
+    if practice_mode == "mock":
+        return int(_mock_target(exam)["question_count"])
+    if requested_question_types:
+        return max(4, min(10, len(requested_question_types) * 2))
+    return 5
+
+
+def _ensure_question_count(
+    questions: list[dict],
+    target_count: int,
+    passage_text: str,
+    exam: str,
+    requested_types: Optional[list[str]] = None,
+) -> list[dict]:
+    output = [dict(item) for item in questions if isinstance(item, dict)]
+    if target_count <= 0:
+        return output
+    if len(output) >= target_count:
+        return output[:target_count]
+    extras = _offline_fallback_questions(passage_text, requested_types, exam)
+    index = 0
+    while len(output) < target_count and extras:
+        base = dict(extras[index % len(extras)])
+        base["id"] = f"{base.get('id', 'offline')}_{len(output)}"
+        output.append(base)
+        index += 1
+    return output
 
 
 def _cefr_from_difficulty(score: Optional[int], default: str) -> str:
@@ -1346,7 +1395,12 @@ def start_filtered_session(req: FilteredPracticeRequest):
     if not profile:
         raise HTTPException(400, "No profile")
 
+    is_mock = req.practice_mode == "mock"
     cefr = _cefr_from_difficulty(req.difficulty, profile.cefr_level or "B2")
+    if is_mock:
+        cefr = _cefr_floor(cefr, str(_mock_target(req.exam)["cefr_floor"]))
+    target_question_count = _question_target(req.exam, req.practice_mode, req.question_types)
+    min_words = int(_mock_target(req.exam)["min_words"]) if is_mock else _min_passage_words(req.exam)
 
     seen = user_model.get_seen_ids(profile.user_id)
     fallback_notes: list[str] = []
@@ -1385,6 +1439,26 @@ def start_filtered_session(req: FilteredPracticeRequest):
         ).fetchall()
 
     def _load_filtered_rows(exclude_seen: bool) -> list:
+        if is_mock and not req.subject and not req.topic:
+            accepted_difficulties = [level for level, rank in _CEFR_ORDER.items() if rank >= _CEFR_ORDER.get(cefr, 0)]
+            conditions = ["content_type = ?", "exam = ?"]
+            params = ["reading", req.exam]
+            if accepted_difficulties:
+                placeholders = ",".join("?" * len(accepted_difficulties))
+                conditions.append(f"difficulty IN ({placeholders})")
+                params.extend(accepted_difficulties)
+            if exclude_seen and seen:
+                conditions.append(f"chunk_id NOT IN ({','.join('?' * len(seen))})")
+                params.extend(seen)
+            params.append(60)
+            return kb._sql.execute(
+                f"""SELECT rowid, *
+                    FROM chunks
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY rowid DESC LIMIT ?""",
+                params,
+            ).fetchall()
+
         if req.subject or req.topic:
             conditions = [
                 "content_type = ?",
@@ -1461,6 +1535,16 @@ def start_filtered_session(req: FilteredPracticeRequest):
                 0 if item.questions else 1,
             )
         )
+    elif passages and is_mock:
+        passages.sort(
+            key=lambda item: (
+                0 if item.mock_exam_ready else 1,
+                0 if item.word_count >= min_words else 1,
+                0 if len(item.questions) >= target_question_count else 1,
+                -item.word_count,
+                -len(item.questions),
+            )
+        )
 
     if not passages:
         # No passages found - try AI generation if available
@@ -1475,6 +1559,7 @@ def start_filtered_session(req: FilteredPracticeRequest):
                 cefr_level=cefr,
                 exam=req.exam,
                 topic=req.subject or "general",
+                min_words=min_words if is_mock else None,
             )
             passage_text = gen["passage"]
 
@@ -1495,6 +1580,7 @@ def start_filtered_session(req: FilteredPracticeRequest):
                 cefr_level=cefr,
                 ai_client=ai,
             )
+            questions = _ensure_question_count(questions, target_question_count, passage_text, req.exam, req.question_types)
 
             chunk_id = f"ai_filtered_{uuid.uuid4().hex[:8]}"
             passage_subject = req.subject or gen.get("subject") or gen.get("topic", "")
@@ -1514,9 +1600,13 @@ def start_filtered_session(req: FilteredPracticeRequest):
         passage_topic = req.topic or passage.topic
         passage_difficulty = passage.difficulty or cefr
         passage_word_count = passage.word_count
+        questions = list(passage.questions)
         upgraded = False
 
-        if ai and _needs_ai_passage_upgrade(req.exam, passage.word_count):
+        if ai and (
+            _needs_ai_passage_upgrade(req.exam, passage.word_count)
+            or (is_mock and len(questions) < target_question_count)
+        ):
             try:
                 from ai.question_distribution import generate_questions_with_distribution, TOEFL_STANDARD_DISTRIBUTION, IELTS_STANDARD_DISTRIBUTION
 
@@ -1524,6 +1614,7 @@ def start_filtered_session(req: FilteredPracticeRequest):
                     cefr_level=passage.difficulty or cefr,
                     exam=req.exam,
                     topic=req.topic or req.subject or passage.topic,
+                    min_words=min_words if is_mock else None,
                 )
                 passage_text = gen["passage"]
                 chunk_id = f"ai_filtered_{uuid.uuid4().hex[:8]}"
@@ -1546,7 +1637,8 @@ def start_filtered_session(req: FilteredPracticeRequest):
                     cefr_level=cefr,
                     ai_client=ai,
                 )
-                fallback_notes.append("本地素材篇幅不足，已自动升级为 AI 长篇文章。")
+                questions = _ensure_question_count(questions, target_question_count, passage_text, req.exam, req.question_types)
+                fallback_notes.append("本地素材不满足模考篇幅或题量要求，已自动升级为 AI 长篇文章。")
                 upgraded = True
             except Exception:
                 upgraded = False
@@ -1566,7 +1658,7 @@ def start_filtered_session(req: FilteredPracticeRequest):
                         questions = questions[: min(len(questions), 5)]
 
                 # If no questions or filtered out all questions, generate new ones
-                if not questions and ai:
+                if (not questions or (is_mock and len(questions) < target_question_count)) and ai:
                     from ai.question_distribution import generate_questions_with_distribution, TOEFL_STANDARD_DISTRIBUTION, IELTS_STANDARD_DISTRIBUTION
 
                     if req.question_types:
@@ -1585,6 +1677,8 @@ def start_filtered_session(req: FilteredPracticeRequest):
                     )
                     if questions:
                         _cache_passage_questions(kb, passage, questions)
+                if is_mock:
+                    questions = _ensure_question_count(questions, target_question_count, passage_text, req.exam, req.question_types)
             except Exception:
                 questions = []
 
@@ -1593,6 +1687,8 @@ def start_filtered_session(req: FilteredPracticeRequest):
     if not questions:
         questions = _offline_fallback_questions(passage_text, req.question_types, req.exam)
         fallback_notes.append("当前使用离线 fallback 题，保证训练不中断。")
+    elif is_mock:
+        questions = _ensure_question_count(questions, target_question_count, passage_text, req.exam, req.question_types)
 
     # Create session
     sid = uuid.uuid4().hex[:12]

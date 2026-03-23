@@ -37,7 +37,7 @@ function renderLauncher(el, coach) {
   const preferredSection = activeTask?.recommended_section || null;
   el.innerHTML = `
     <h1>⏱ Mock Exam</h1>
-    <p style="color:var(--text-dim)">启动一套连续 section 流的模考会话。当前版本会记录每个 section 的状态、继续进度和完成态。</p>
+    <p style="color:var(--text-dim)">启动一套连续 section 流的模考会话。只选 1 个 section 时会直接打开；多 section 时会保留顺序和继续进度。</p>
 
     ${renderCoachHint(coachTask || contextTask, coach)}
 
@@ -61,6 +61,12 @@ function renderLauncher(el, coach) {
             `).join('')}
           </div>
         </div>
+        <div>
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:10px">START WITH</div>
+          <select id="mock-start-section"
+            style="width:100%;padding:10px 12px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:10px">
+          </select>
+        </div>
       </div>
 
       <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap">
@@ -82,6 +88,16 @@ function renderLauncher(el, coach) {
   `;
 
   let activeExam = preferredExam;
+  const refreshStartSectionSelect = () => {
+    const selected = Array.from(el.querySelectorAll('.mock-section:checked')).map(node => node.value);
+    const select = el.querySelector('#mock-start-section');
+    if (!select) return;
+    select.innerHTML = selected.map(section => `
+      <option value="${section}" ${preferredSection === section ? 'selected' : ''}>${section.toUpperCase()}</option>
+    `).join('');
+    if (!select.value && selected.length) select.value = selected[0];
+  };
+
   el.querySelectorAll('.mock-exam-tab').forEach(btn => {
     btn.addEventListener('click', () => {
       activeExam = btn.dataset.exam;
@@ -90,17 +106,27 @@ function renderLauncher(el, coach) {
       });
     });
   });
+  el.querySelectorAll('.mock-section').forEach(node => {
+    node.addEventListener('change', refreshStartSectionSelect);
+  });
+  refreshStartSectionSelect();
 
   el.querySelector('#btn-go-practice')?.addEventListener('click', () => navigate('practice'));
   el.querySelector('#btn-start-mock')?.addEventListener('click', async () => {
     const sections = Array.from(el.querySelectorAll('.mock-section:checked')).map(node => node.value);
     if (!sections.length) return;
+    const startWith = el.querySelector('#mock-start-section')?.value || sections[0];
+    const orderedSections = [startWith, ...sections.filter(section => section !== startWith)];
     const btn = el.querySelector('#btn-start-mock');
     btn.disabled = true;
     btn.textContent = 'Starting...';
     try {
-      const session = await api.post('/api/mock-exam/start', { exam: activeExam, sections });
+      const session = await api.post('/api/mock-exam/start', { exam: activeExam, sections: orderedSections });
       _mockStore.set(session);
+      if (orderedSections.length === 1) {
+        openSection(session, orderedSections[0], 0);
+        return;
+      }
       renderSessionView(el, session);
     } catch (e) {
       btn.disabled = false;

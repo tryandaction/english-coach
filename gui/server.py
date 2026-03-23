@@ -13,8 +13,14 @@ from fastapi.responses import FileResponse
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    # Startup: Background tasks disabled for stability
-    # TODO: Re-enable after fixing pool seeding issues
+    try:
+        from gui.api.reading import seed_pool_on_startup as seed_reading_pool
+        from gui.api.listening import seed_pool_on_startup as seed_listening_pool
+
+        await seed_reading_pool()
+        await seed_listening_pool()
+    except Exception:
+        pass
     yield  # Server runs here
     # Shutdown: cleanup if needed
     pass
