@@ -3,7 +3,10 @@
 English Coach — 发货助手
 收到付款后运行此脚本，选择套餐，自动生成唯一 Key 并复制到剪贴板。
 
-用法：双击运行，或 python send_key.py
+用法：
+  python send_key.py
+  python send_key.py --plan 1
+  python send_key.py --days 30 --note "首购30天"
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ if str(ROOT) not in sys.path:
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-from commercial.seller.license_keygen import choose_plan_interactive, generate_key
+from commercial.seller.license_keygen import choose_plan_interactive, generate_key, get_plan_options
 
 
 def copy_to_clipboard(text: str) -> bool:
@@ -70,12 +73,41 @@ def build_delivery_message(*, key: str, days: int, label: str, note: str, renewa
 def main() -> None:
     parser = argparse.ArgumentParser(description="English Coach 发货助手")
     parser.add_argument("--cli", action="store_true", help="兼容参数；当前默认即终端模式")
-    _ = parser.parse_args()
+    parser.add_argument("--plan", type=str, default="", help="套餐编号 1-6")
+    parser.add_argument("--days", type=int, default=None, help="自定义天数")
+    parser.add_argument("--note", type=str, default="", help="备注")
+    parser.add_argument("--no-copy", action="store_true", help="不复制到剪贴板")
+    args = parser.parse_args()
 
-    choice = choose_plan_interactive()
+    if args.plan and args.days is not None:
+        raise SystemExit("--plan 和 --days 不能同时使用。")
+
+    plans = get_plan_options()
+    if args.plan:
+        if args.plan not in plans:
+            raise SystemExit("无效套餐编号，只能是 1-6。")
+        choice = dict(plans[args.plan])
+        if args.note.strip():
+            choice["note"] = args.note.strip()
+    elif args.days is not None:
+        if args.days <= 0:
+            raise SystemExit("--days 必须大于 0。")
+        choice = {
+            "days": int(args.days),
+            "label": f"自定义 {int(args.days)}天",
+            "note": args.note.strip(),
+            "renewal": False,
+        }
+    else:
+        if not sys.stdin.isatty():
+            raise SystemExit("非交互模式下请传 --plan 或 --days。")
+        choice = choose_plan_interactive()
+        if args.note.strip():
+            choice["note"] = args.note.strip()
+
     days = int(choice["days"])
-    label = choice["label"]
-    note = choice.get("note", "")
+    label = str(choice["label"])
+    note = str(choice.get("note", "") or "")
 
     print("\n正在生成 Key 并注册到服务器...")
     key = generate_key(days, note)
@@ -98,14 +130,11 @@ def main() -> None:
     print()
     print("=" * 50)
 
-    copied = copy_to_clipboard(message)
+    copied = False if args.no_copy else copy_to_clipboard(message)
     if copied:
         print("✓ 已复制到剪贴板，Ctrl+V 粘贴即可。")
     else:
-        print("剪贴板复制失败，请手动复制上方内容。")
-
-    print()
-    input("按回车关闭...")
+        print("未复制到剪贴板，请手动复制上方内容。")
 
 
 if __name__ == "__main__":
