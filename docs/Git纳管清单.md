@@ -35,6 +35,7 @@
   - `README.md`
   - `SECURITY.md`
   - `pyproject.toml`
+  - `操作中心.pyw`
   - `build_cloud.py`
   - `build_opensource.py`
   - `license_keygen.py`
@@ -153,6 +154,16 @@ git diff --cached
 - `private_commercial/README.md` 这种说明文件如果被 add，是正常的；真实私有文件不会被 add
 
 ## 六、你平时日常操作只要记住这些
+
+### 默认优先
+
+直接双击：
+
+```text
+操作中心.pyw
+```
+
+如果你不想记命令，优先用这个。
 
 ### 开源版发包
 
