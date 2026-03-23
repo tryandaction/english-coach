@@ -31,6 +31,8 @@
 - Mock coach 任务会默认预选一个推荐 section，而不是默认整套
 - Listening 新增高命中离线素材，优先覆盖 TOEFL `detail` / `organization` 与 IELTS `multiple_choice` / `form_completion`
 - Reading 新增高命中离线题型元数据，优先覆盖 TOEFL `factual` / `inference` 与 IELTS `tfng` / `matching_headings`
+- Mock Reading 现在会优先命中更长的本地长篇素材，不再默认掉到过短 passage
+- Mock Exam 现在可以明确指定先做哪个 section，而不是只能走默认顺序
 
 ### 4. 学习结果闭环更完整
 
@@ -49,15 +51,18 @@
 - smoke 会自动完成最小离线 Setup，并验证 Reading / Listening 后的结果回写
 - `python build_opensource.py` 会一次生成 exe、setup 和 zip，减少手工发布步骤
 - `python build_cloud.py` 也会一次生成 exe、setup 和 zip，减少商业版手工发布步骤
+- 商业卖家侧继续以 `python send_key.py` 作为默认入口，可直接输出买家文案
 
 ## 当前适合重点测试的内容
 
 1. 首启 Setup 是否能顺利完成
 2. Home 的 coach 任务是否清晰、是否能一键进入真实训练页
 3. 不配置 API key 时，Vocabulary / Grammar / Reading / Listening / History 是否都可正常使用
-4. 配置 API key 后，Writing / Speaking / Chat 是否正常工作
-5. 完成任意训练后，Progress / History 是否立即出现真实变化
-6. 测试提醒与 quiet hours 是否按预期工作
+4. Mock Exam 选择不同 section 起点时，是否能直接进入对应 section
+5. Mock Reading 的篇幅、题量和加载速度是否更像正式训练
+6. 配置 API key 后，Writing / Speaking / Chat 是否正常工作
+7. 完成任意训练后，Progress / History 是否立即出现真实变化
+8. 测试提醒与 quiet hours 是否按预期工作
 
 ## 当前仍要保持克制的地方
 
