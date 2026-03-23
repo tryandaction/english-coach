@@ -19,13 +19,16 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertTrue(response.text.strip(), path.name)
 
     def test_empty_state_core_routes_return_200(self) -> None:
-        components = (None, None, None, None, None)
-        with patch("gui.api.progress.get_components", return_value=components), patch(
-            "gui.api.coach.get_components",
-            return_value=components,
+        user_components = (None, None)
+        with patch("gui.api.progress.get_user_components", return_value=user_components), patch(
+            "gui.api.progress.build_coach_runtime",
+            return_value={"ai_ready": False},
+        ), patch(
+            "gui.api.coach.get_user_components",
+            return_value=user_components,
         ), patch(
             "gui.api.history.get_components",
-            return_value=components,
+            return_value=(None, None, None, None, None),
         ):
             client = TestClient(create_app())
             self.assertEqual(client.get("/").status_code, 200)

@@ -1,0 +1,6 @@
+name = "english-coach-license"
+pages_build_output_dir = "."
+
+[[kv_namespaces]]
+binding = "LICENSE_KV"
+id = "cb546f69fa4e43b18840b0cf9d6bb046"

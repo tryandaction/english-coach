@@ -11,7 +11,15 @@ const _mockStore = {
 
 let _timerId = null;
 
+function clearMockTimer() {
+  if (_timerId) {
+    clearInterval(_timerId);
+    _timerId = null;
+  }
+}
+
 export async function render(el) {
+  clearMockTimer();
   const saved = _mockStore.get();
   if (saved?.session_id) {
     await refreshSession(el, saved.session_id);
@@ -131,7 +139,7 @@ function renderCoachHint(task, coach) {
 }
 
 function renderSessionView(el, session) {
-  if (_timerId) clearInterval(_timerId);
+  clearMockTimer();
   _mockStore.set(session);
   if (session.exam_complete) {
     renderCompletedView(el, session);
@@ -139,6 +147,7 @@ function renderSessionView(el, session) {
   }
 
   el.innerHTML = `
+    <div data-mock-session-root="1">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:18px">
       <div>
         <h1 style="margin:0 0 6px 0">⏱ ${escHtml((session.exam || 'toefl').toUpperCase())} Mock Exam</h1>
@@ -180,6 +189,7 @@ function renderSessionView(el, session) {
         `).join('')}
       </div>
     </div>
+    </div>
   `;
 
   el.querySelector('#btn-refresh-mock')?.addEventListener('click', () => refreshSession(el, session.session_id));
@@ -191,7 +201,13 @@ function renderSessionView(el, session) {
   el.querySelectorAll('[data-open-section]').forEach(btn => {
     btn.addEventListener('click', () => openSection(session, btn.dataset.openSection, Number(btn.dataset.index)));
   });
-  _timerId = setInterval(() => refreshSession(el, session.session_id), 5000);
+  _timerId = setInterval(() => {
+    if (!el.isConnected || !el.querySelector('[data-mock-session-root="1"]')) {
+      clearMockTimer();
+      return;
+    }
+    refreshSession(el, session.session_id);
+  }, 5000);
 }
 
 function renderCompletedView(el, session) {
@@ -205,6 +221,20 @@ function renderCompletedView(el, session) {
         <span class="tag">Score ${escHtml(report.overall_score || 'N/A')}</span>
         <span class="tag">Accuracy ${escHtml(String(report.overall_accuracy ?? 'N/A'))}%</span>
         <span class="tag">Time ${formatElapsed(report.total_time || session.elapsed_time || 0)}</span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:0 0 20px 0;text-align:left">
+        <div class="card" style="padding:14px;background:var(--bg2)">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">这次做了什么</div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.7">${escHtml(report.result_card || '本轮模考已完成。')}</div>
+        </div>
+        <div class="card" style="padding:14px;background:var(--bg2)">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">哪一点进步了</div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.7">${escHtml(report.improved_point || '整套 section 已经能完整跑通。')}</div>
+        </div>
+        <div class="card" style="padding:14px;background:var(--bg2)">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">明天为什么回来</div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.7">${escHtml(report.tomorrow_reason || mockNextStep(report))}</div>
+        </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:20px 0;text-align:left">
         ${(report.section_scores || []).map(item => `
@@ -243,8 +273,12 @@ function renderCompletedView(el, session) {
 function renderSectionSummary(summary) {
   const correct = summary.correct ?? null;
   const total = summary.total ?? null;
-  if (correct === null || total === null) return '';
-  return `<div style="font-size:12px;color:var(--text-dim);margin-top:8px">Result: ${correct} / ${total}</div>`;
+  const rows = [];
+  if (correct !== null && total !== null) rows.push(`<div style="font-size:12px;color:var(--text-dim);margin-top:8px">Result: ${correct} / ${total}</div>`);
+  if (summary.result_card) rows.push(`<div style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:6px">${escHtml(summary.result_card)}</div>`);
+  if (summary.improved_point) rows.push(`<div style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:6px">进步点：${escHtml(summary.improved_point)}</div>`);
+  if (summary.tomorrow_reason) rows.push(`<div style="font-size:12px;color:var(--text-dim);line-height:1.6;margin-top:6px">明天：${escHtml(summary.tomorrow_reason)}</div>`);
+  return rows.join('');
 }
 
 function renderSectionAction(section, index) {
@@ -268,6 +302,7 @@ async function refreshSession(el, sessionId) {
 }
 
 function openSection(session, section, index) {
+  clearMockTimer();
   sessionStorage.setItem(PRACTICE_KEY, JSON.stringify({
     source: 'mock_exam',
     section,
@@ -291,6 +326,7 @@ function formatElapsed(seconds) {
 }
 
 function mockNextStep(report) {
+  if (report.tomorrow_reason) return report.tomorrow_reason;
   const weak = (report.weak_areas || [])[0];
   if (weak) {
     return `先回到 Practice 里针对 ${weak} 做专项训练，再开始下一轮 mock，会比直接重复整套模考更高效。`;

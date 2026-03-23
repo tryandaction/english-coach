@@ -5,7 +5,7 @@ from typing import Optional
 
 from core.coach.service import CoachNotificationDispatcher, CoachService
 from gui.api.license import build_license_status
-from gui.deps import get_components
+from gui.deps import get_user_components
 from gui.version import get_version_mode
 from utils.logger import get_logger
 
@@ -42,7 +42,7 @@ class CoachScheduler(threading.Thread):
 
     def tick(self) -> None:
         try:
-            kb, srs, user_model, ai, profile = get_components()
+            user_model, profile = get_user_components()
             if not profile:
                 return
             service = CoachService(user_model, profile, build_coach_runtime())

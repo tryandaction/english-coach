@@ -26,7 +26,7 @@ async function navigate(name) {
   // Check version mode and redirect license page in opensource
   try {
     const status = await fetch('/api/setup/status').then(r => r.json());
-    if (!status.configured && name !== 'setup') {
+    if ((!status.configured || status.needs_data_dir_review) && name !== 'setup') {
       name = 'setup';
     }
     if (name === 'license' && status.version_mode === 'opensource') {
@@ -256,8 +256,7 @@ function hideOverlay() {
 // Check setup on load with timeout protection
 async function init() {
   setStartupMsg('Checking configuration…');
-  let licStatus = { active: false };
-  let versionMode = 'opensource';
+  let runtimeStatus = {};
 
   // Timeout protection: force show UI after 5 seconds no matter what
   const forceShowTimeout = setTimeout(() => {
@@ -271,10 +270,10 @@ async function init() {
       api.get('/api/setup/status'),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
     ]);
-    versionMode = status.version_mode || 'opensource';
+    runtimeStatus = status || {};
 
     // First-run detection: if not configured, go directly to setup wizard
-    if (!status.configured) {
+    if (!status.configured || status.needs_data_dir_review) {
       clearTimeout(forceShowTimeout);
       hideOverlay();
       navigate('setup');
@@ -284,16 +283,12 @@ async function init() {
     console.warn('Setup check failed:', e);
   }
 
-  if (versionMode === 'cloud') {
+  if ((runtimeStatus.version_mode || 'opensource') === 'cloud') {
     try {
-      licStatus = await Promise.race([
-        api.get('/api/license/status'),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
-      ]);
       const licLink = document.querySelector('[data-page="license"]');
       if (licLink) {
         const dot = document.createElement('span');
-        dot.className = `nav-status-dot ${licStatus.active ? 'active' : 'inactive'}`;
+        dot.className = `nav-status-dot ${runtimeStatus.cloud_license_active ? 'active' : 'inactive'}`;
         licLink.appendChild(dot);
       }
     } catch (e) {
@@ -307,8 +302,8 @@ async function init() {
   navigate('home');
 
   // Defer all background work well after UI is visible
-  setTimeout(() => _preloadContent(licStatus), 3000);
-  if (licStatus.active) {
+  setTimeout(() => _preloadContent(runtimeStatus), 3000);
+  if (runtimeStatus.cloud_license_active) {
     setTimeout(() => {
       fetch('/api/warehouse/populate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
     }, 15000);
@@ -340,7 +335,7 @@ async function _preloadContent(licStatus) {
     } catch {}
   }
   // Chat — pre-load a session if AI is available and none cached
-  if (!localStorage.getItem('chat_current') && licStatus.active) {
+  if (!localStorage.getItem('chat_current') && licStatus.cloud_license_active) {
     try {
       const r = await fetch('/api/chat/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (r.ok) {

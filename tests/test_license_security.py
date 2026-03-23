@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 
 import gui.license as license_mod
+from gui.api import license as license_api
 
 
 class LicenseSecurityTests(unittest.TestCase):
@@ -54,6 +57,21 @@ class LicenseSecurityTests(unittest.TestCase):
         self.assertEqual(cfg["mode"], "proxy_token")
         self.assertEqual(cfg["api_key"], "session.token.example")
         self.assertEqual(cfg["base_url"], "https://license.example.test/v1")
+
+    def test_post_worker_parses_json_body_from_http_error(self) -> None:
+        error_body = io.BytesIO('{"ok": false, "error": "Key 无效或未注册"}'.encode("utf-8"))
+        http_error = urllib.error.HTTPError(
+            url="https://license.example.test/activate",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=error_body,
+        )
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=http_error):
+            result = license_api._post_worker("/activate", {"key": "ABCD-EF12-3456-7890"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "Key 无效或未注册")
+        self.assertEqual(result["http_status"], 404)
 
 
 if __name__ == "__main__":

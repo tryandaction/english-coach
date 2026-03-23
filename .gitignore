@@ -22,6 +22,10 @@ config.yaml
 !.env.example
 seller_cloud_config.json
 cloud_activation_config.json
+key_log.jsonl
+/private_commercial/**
+!/private_commercial/
+!/private_commercial/README.md
 
 # PyInstaller
 *.spec.bak
@@ -37,39 +41,11 @@ Thumbs.db
 # Releases folder (contains binaries and sensitive files)
 releases/
 !releases/*.md
+releases/cloud_activation_config.json
 
-# Commercial/License system (not for open source)
-send_key.py
-license_keygen.py
-key_log.jsonl
-云版卖家操作手册.md
-cloudflare-pages/
-cloudflare-worker/
-build_cloud.py
-english_coach_cloud.spec
-installer_cloud.iss
-cloud_activation_config.example.json
-seller_cloud_config.example.json
-seller_cloud_defaults.py
-QUICK_START_v2.0.md
-RELEASE_NOTES_v2.0.md
-PRODUCT_EDITIONS.md
-使用指南.md
-scripts/
-hooks/
-run_portable.bat
-config.release.yaml
-build_opensource.py
-english_coach_opensource.spec
-installer_opensource.iss
-verify_versions.py
-convert_vocab.py
-test_api_endpoints.py
-test_endpoints_direct.py
-content/vocab_expanded/
-content/vocab_selected/
-fix_typing.py
-fix_uvicorn_types.py
+# Tool caches
+commercial/deploy/pages/.wrangler/
+release_tooling/installers/releases/
 
 # Build artifacts
 *.exe

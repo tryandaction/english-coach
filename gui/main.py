@@ -14,6 +14,7 @@ from pathlib import Path
 # Static imports for PyInstaller compatibility
 # NOTE: uvicorn imported dynamically to avoid Python 3.13 type annotation issues
 from gui.coach_runtime import start_coach_scheduler
+from gui.deps import warm_components
 from gui.server import create_app
 
 # Ensure project root is on sys.path when running as exe
@@ -253,6 +254,12 @@ def main() -> None:
         _log("Coach scheduler started")
     except Exception as e:
         _log(f"Coach scheduler failed to start: {type(e).__name__}: {e}")
+
+    try:
+        warm_components(blocking=False)
+        _log("Background component warmup started")
+    except Exception as e:
+        _log(f"Background component warmup failed to start: {type(e).__name__}: {e}")
 
     # Wait for server to be ready
     health_url = f"http://127.0.0.1:{port}/health"

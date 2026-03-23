@@ -10,6 +10,7 @@ Provides realistic exam simulation with:
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from core.coach.recap import build_mock_exam_recap, build_mock_section_recap
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/mock-exam", tags=["mock-exam"])
@@ -61,6 +63,21 @@ class MockExamSession:
 
 
 _mock_sessions: dict[str, MockExamSession] = {}
+
+_MOCK_SECTION_BLUEPRINTS = {
+    "toefl": {
+        "reading": {"item_count": 10, "time_limit": 18},
+        "listening": {"item_count": 6, "time_limit": 10},
+        "speaking": {"item_count": 1, "time_limit": 4},
+        "writing": {"item_count": 1, "time_limit": 20},
+    },
+    "ielts": {
+        "reading": {"item_count": 10, "time_limit": 20},
+        "listening": {"item_count": 10, "time_limit": 10},
+        "speaking": {"item_count": 1, "time_limit": 5},
+        "writing": {"item_count": 1, "time_limit": 20},
+    },
+}
 
 
 def _section_status(session: MockExamSession, index: int) -> str:
@@ -137,15 +154,20 @@ def start_mock_exam(req: StartMockExamRequest):
         if section not in valid_sections:
             raise HTTPException(400, f"Invalid section: {section}")
 
-    # Generate content for each section
     sections_data = []
     timing = TOEFL_TIMING if req.exam == "toefl" else IELTS_TIMING
+    blueprints = _MOCK_SECTION_BLUEPRINTS.get(req.exam, {})
 
     for section in req.sections:
-        section_data = _generate_section_content(
-            section, req.exam, profile, kb, srs, user_model, ai
-        )
-        section_data["time_limit"] = timing.get(section, 60)
+        blueprint = blueprints.get(section, {})
+        section_data = {
+            "section": section,
+            # Start instantly, then let the destination section page generate the
+            # actual task content. The launcher still shows realistic micro-section
+            # expectations for item count and time.
+            "item_count": int(blueprint.get("item_count", 1) or 1),
+            "time_limit": int(blueprint.get("time_limit", timing.get(section, 60)) or 60),
+        }
         sections_data.append(section_data)
 
     # Create session
@@ -377,9 +399,20 @@ def _complete_section(session: MockExamSession, req: CompleteSectionRequest) -> 
     session.section_times[section_id] = section_duration
 
     if req.result:
-        session.completed_sections[req.section_index] = req.result
+        summary = dict(req.result)
     else:
-        session.completed_sections.setdefault(req.section_index, {"completed": True})
+        summary = {"completed": True}
+    if "result_card" not in summary or "improved_point" not in summary or "tomorrow_reason" not in summary:
+        recap = build_mock_section_recap(
+            section=session.sections[req.section_index]["section"],
+            correct=int(summary.get("correct", 0) or 0),
+            total=int(summary.get("total", 0) or 0),
+            overall=float(summary.get("overall", 0) or 0),
+            score_max=float(summary.get("score_max", 0) or 0),
+        )
+        for key, value in recap.items():
+            summary.setdefault(key, value)
+    session.completed_sections[req.section_index] = summary
 
     session.current_section = req.section_index + 1
     if session.current_section >= len(session.sections):
@@ -472,6 +505,13 @@ def _generate_score_report(session: MockExamSession):
 
     # Calculate percentile (simplified - would use historical data in production)
     percentile = int(overall_accuracy * 100)
+    weak_areas = _identify_weak_areas(section_scores)
+    recap = build_mock_exam_recap(
+        exam=session.exam,
+        total_correct=total_correct,
+        total_questions=total_questions,
+        weak_areas=weak_areas,
+    )
 
     # Record session
     total_duration = int(time.time() - session.start_time)
@@ -480,6 +520,19 @@ def _generate_score_report(session: MockExamSession):
         duration_sec=total_duration,
         items_done=total_questions,
         accuracy=overall_accuracy,
+        content_json=json.dumps(
+            {
+                "exam": session.exam,
+                "overall_score": score_label,
+                "overall_accuracy": round(overall_accuracy * 100, 1),
+                "total_correct": total_correct,
+                "total_questions": total_questions,
+                "section_scores": section_scores,
+                "weak_areas": weak_areas,
+                **recap,
+            },
+            ensure_ascii=False,
+        ),
     )
 
     return {
@@ -492,8 +545,9 @@ def _generate_score_report(session: MockExamSession):
         "percentile": percentile,
         "section_scores": section_scores,
         "total_time": total_duration,
-        "weak_areas": _identify_weak_areas(section_scores),
+        "weak_areas": weak_areas,
         "recommendations": _generate_exam_recommendations(section_scores, overall_accuracy),
+        **recap,
     }
 
 

@@ -1,10 +1,13 @@
 """Progress summary and skill scores API."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter
+from core.srs.engine import SM2Engine
 from core.coach.service import CoachService
 from gui.coach_runtime import build_coach_runtime
-from gui.deps import get_components
+from gui.deps import _CONFIG_PATH, get_user_components, load_config
 
 router = APIRouter(prefix="/api/progress", tags=["progress"])
 
@@ -57,19 +60,39 @@ def _empty_progress(ai_ready: bool) -> dict:
     }
 
 
+def _resolve_data_dir() -> str:
+    cfg = load_config() or {}
+    raw = cfg.get("data_dir", "data")
+    path = Path(raw)
+    resolved = path if path.is_absolute() else _CONFIG_PATH.parent / raw
+    return str(resolved.resolve())
+
+
 @router.get("")
 def get_progress():
-    kb, srs, user_model, ai, profile = get_components()
+    runtime = build_coach_runtime()
+    user_model, profile = get_user_components()
     if not profile:
-        return _empty_progress(ai is not None)
-    coach_service = CoachService(user_model, profile, build_coach_runtime())
+        return _empty_progress(bool(runtime.get("ai_ready")))
+
+    coach_service = CoachService(user_model, profile, runtime)
     coach_summary = coach_service.coach_summary()
 
     summary = user_model.progress_summary(profile.user_id)
-    deck = srs.deck_stats(profile.user_id)
+    deck = {"total": 0, "due_today": 0, "mature": 0}
+    srs = None
+    try:
+        srs = SM2Engine(Path(_resolve_data_dir()) / "user.db")
+        deck = srs.deck_stats(profile.user_id)
+    finally:
+        if srs is not None:
+            try:
+                srs._db.close()
+            except Exception:
+                pass
 
     # Session history last 14 days
-    rows = srs._db.execute(
+    rows = user_model._db.execute(
         """SELECT date(started_at) as day, COUNT(*) as sessions,
                   SUM(items_done) as items, AVG(accuracy) as acc
            FROM sessions WHERE user_id=?
@@ -132,7 +155,7 @@ def get_progress():
         "name": profile.name,
         "cefr_level": profile.cefr_level,
         "target_exam": profile.target_exam,
-        "has_ai": ai is not None,
+        "has_ai": bool(runtime.get("ai_ready")),
         "streak_days": summary.get("streak_days", 0),
         "total_sessions": summary.get("total_sessions", 0),
         "total_items": summary.get("total_items", 0),

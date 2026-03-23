@@ -10,6 +10,7 @@
 - `config.yaml`
 - `data/`
 - `releases/`
+- `private_commercial/` 下的真实文件
 - `seller_cloud_config.json`
 - `cloud_activation_config.json`
 - 任意真实 API key / token / secret
@@ -21,16 +22,19 @@
 公开仓库应只包含：
 
 - Open Source 主程序源码
+- Cloud / 商业版共享代码
+- Cloudflare 激活服务实现代码
+- `commercial/` 目录下的卖家工具脚本本身
 - 本地离线学习能力
 - 用户自带 API key 的接入逻辑
 - 不含真实值的占位或空默认配置
 
 公开仓库不应包含：
 
-- Cloud 激活后端部署目录
-- 卖家注册码管理脚本
+- `private_commercial/` 中的真实配置与日志
 - 商业版真实激活地址与 token
-- 内部运维文档
+- 任意真实卖家配置、订单、发货记录
+- 发布目录中的真实商业配置文件
 
 ## 提交前自检
 
@@ -61,3 +65,4 @@ git diff --cached
 - 受限代理 token
 - 密钥不落客户端
 - 公开仓库不携带真实部署配置
+- 私有配置集中放在 `private_commercial/`

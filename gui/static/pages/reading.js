@@ -314,7 +314,7 @@ async function loadLibraryPreview(el) {
     const data = await api.get(`/api/reading/passages/library?${params}`);
     const passages = data.passages || [];
     target.innerHTML = passages.length ? passages.map(item => `
-      <div class="card" style="padding:14px;background:var(--bg2);margin-bottom:10px">
+      <button class="card reading-preview-card" data-chunk-id="${escHtml(item.chunk_id || '')}" style="padding:14px;background:var(--bg2);margin-bottom:10px;width:100%;text-align:left;cursor:pointer">
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
           <span class="tag">${escHtml(item.difficulty || '?')}</span>
           ${item.topic ? `<span class="tag">${escHtml(item.topic)}</span>` : ''}
@@ -322,10 +322,42 @@ async function loadLibraryPreview(el) {
           ${item.word_count ? `<span class="tag">${item.word_count} words</span>` : ''}
         </div>
         <div style="font-size:13px;color:var(--text-dim);line-height:1.5">${escHtml(item.preview || '')}</div>
-      </div>
+      </button>
     `).join('') : '<div class="alert alert-info">当前筛选下没有精确命中的素材。开始训练时会自动尝试回退。</div>';
+    target.querySelectorAll('.reading-preview-card').forEach(card => {
+      card.addEventListener('click', async () => {
+        await startLibraryPassage(el, card.dataset.chunkId || '');
+      });
+    });
   } catch (e) {
     target.innerHTML = `<div class="alert alert-warn">${escHtml(e.message)}</div>`;
+  }
+}
+
+async function startLibraryPassage(el, chunkId) {
+  if (!chunkId) return;
+  const body = el.querySelector('#reading-body');
+  if (!body) return;
+  body.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div></div>';
+  try {
+    const result = await api.post('/api/reading/start-from-library', {
+      exam: _filterState.exam,
+      chunk_id: chunkId,
+      difficulty: _filterState.difficultyScore,
+      question_types: _filterState.selectedTypes.length ? _filterState.selectedTypes : null,
+      practice_mode: 'targeted',
+    });
+    if (window._currentAbortSignal?.aborted || !el.isConnected) return;
+    _sid = result.session_id;
+    _qTotal = result.question_count;
+    _qIndex = 0;
+    _correct = 0;
+    _passageData = { ...result, practice: _activePractice, last_start: _lastStart };
+    _store.set({ ..._passageData, q_index: 0, correct: 0, last_start: _lastStart });
+    renderPassage(el, _passageData);
+  } catch (e) {
+    if (e.name === 'AbortError' || !el.isConnected) return;
+    body.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 

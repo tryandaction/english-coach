@@ -71,8 +71,10 @@ function renderDashboard(el, d, coach) {
           </div>
         </div>
         <div style="min-width:220px">
-          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">今天结果感</div>
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">这次做了什么</div>
           <div style="font-size:13px;color:var(--text-dim);line-height:1.6">${escHtml(coachSummary.today_result_card || '完成今日计划后，这里会显示结果感。')}</div>
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin:12px 0 8px">哪一点进步了</div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.6">${escHtml(coachSummary.today_improved_point || '完成一次训练后，这里会显示最值得复用的进步。')}</div>
         </div>
       </div>
     </div>

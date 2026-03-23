@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import yaml
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from gui.deps import load_config, reset_components, _CONFIG_PATH
+from gui.deps import load_config, reset_components, warm_components, _CONFIG_PATH
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
+_DATA_DIR_REVIEW_FLAG = _CONFIG_PATH.parent / "pending_data_dir_review.flag"
 
 
 class SetupRequest(BaseModel):
@@ -32,10 +34,35 @@ _ENV_KEYS = {
 }
 
 
+def _normalize_supplied_data_dir(raw: str) -> Path:
+    text = str(raw or "").strip().strip('"').strip("'")
+    p = Path(text)
+    if p.name.lower() == "user.db":
+        return p.parent
+    return p
+
+
 def _resolve_data_dir(cfg: dict) -> Path:
     raw = cfg.get("data_dir", "data")
     p = Path(raw)
     return p if p.is_absolute() else _CONFIG_PATH.parent / raw
+
+
+def _current_data_dir_has_profile(data_dir: Path) -> bool:
+    try:
+        from core.user_model.profile import UserModel
+
+        um = UserModel(data_dir / "user.db")
+        try:
+            return um.get_first_profile() is not None
+        finally:
+            um._db.close()
+    except Exception:
+        return False
+
+
+def _needs_data_dir_review() -> bool:
+    return getattr(sys, "frozen", False) and _DATA_DIR_REVIEW_FLAG.exists()
 
 
 class CheckDataDirRequest(BaseModel):
@@ -45,10 +72,12 @@ class CheckDataDirRequest(BaseModel):
 @router.post("/check_data_dir")
 def check_data_dir(req: CheckDataDirRequest):
     """Check if a directory contains valid English Coach data (user.db with a profile)."""
-    p = Path(req.data_dir.strip())
+    p = _normalize_supplied_data_dir(req.data_dir)
     db = p / "user.db"
     if not p.exists():
         return {"valid": False, "error": f"Folder not found: {req.data_dir}"}
+    if not p.is_dir():
+        return {"valid": False, "error": f"Please choose a data folder or user.db file: {req.data_dir}"}
     if not db.exists():
         return {"valid": False, "error": f"No user.db found in {req.data_dir}"}
     try:
@@ -56,13 +85,16 @@ def check_data_dir(req: CheckDataDirRequest):
         um = UserModel(db)
         profile = um.get_first_profile()
         if not profile:
+            um._db.close()
             return {"valid": False, "error": "Data folder found but contains no user profile"}
         cfg = load_config() or {}
+        um._db.close()
         return {
             "valid": True,
             "name": profile.name,
             "target_exam": getattr(profile, "target_exam", "general"),
             "backend": cfg.get("backend", "deepseek"),
+            "data_dir": str(p.resolve()),
         }
     except Exception as e:
         return {"valid": False, "error": f"Could not read data: {e}"}
@@ -88,6 +120,7 @@ def setup_status():
     has_profile = False
     profile = None
     data_dir = _resolve_data_dir(cfg)
+    current_data_dir = str(data_dir.resolve())
     try:
         from core.user_model.profile import UserModel
         um = UserModel(data_dir / "user.db")
@@ -137,6 +170,9 @@ def setup_status():
         "name": getattr(profile, "name", "") or cfg.get("user", {}).get("name", ""),
         "history_retention_days": int(cfg.get("history_retention_days", 30)),
         "data_dir": cfg.get("data_dir", "data"),
+        "current_data_dir": current_data_dir,
+        "data_dir_has_profile": has_profile or _current_data_dir_has_profile(data_dir),
+        "needs_data_dir_review": _needs_data_dir_review(),
     }
 
 
@@ -151,7 +187,7 @@ def run_setup(req: SetupRequest):
     cfg["history_retention_days"] = req.history_retention_days
 
     if req.data_dir:
-        cfg["data_dir"] = req.data_dir
+        cfg["data_dir"] = str(_normalize_supplied_data_dir(req.data_dir))
 
     # Save API key to .env next to config.yaml
     if req.api_key:
@@ -170,20 +206,28 @@ def run_setup(req: SetupRequest):
 
     with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+    try:
+        _DATA_DIR_REVIEW_FLAG.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     # Create user profile
     data_dir = _resolve_data_dir(cfg)
     data_dir.mkdir(parents=True, exist_ok=True)
     from core.user_model.profile import UserModel
     um = UserModel(data_dir / "user.db")
-    existing = um.get_first_profile()
-    if not existing:
-        um.create_profile(name=req.name, target_exam=req.target_exam, target_exam_date=req.target_exam_date)
-    else:
-        existing.name = req.name
-        existing.target_exam = req.target_exam
-        existing.target_exam_date = req.target_exam_date
-        um.update_profile(existing)
+    try:
+        existing = um.get_first_profile()
+        if not existing:
+            um.create_profile(name=req.name, target_exam=req.target_exam, target_exam_date=req.target_exam_date)
+        else:
+            existing.name = req.name
+            existing.target_exam = req.target_exam
+            existing.target_exam_date = req.target_exam_date
+            um.update_profile(existing)
+    finally:
+        um._db.close()
 
     reset_components()
+    warm_components(blocking=True)
     return {"ok": True}

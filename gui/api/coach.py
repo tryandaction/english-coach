@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from core.coach.service import CoachNotificationDispatcher, CoachService
 from gui.coach_runtime import build_coach_runtime
-from gui.deps import get_components
+from gui.deps import get_user_components
 
 router = APIRouter(prefix="/api/coach", tags=["coach"])
 
@@ -26,7 +28,7 @@ class DismissRequest(BaseModel):
 
 
 def _service() -> CoachService:
-    kb, srs, user_model, ai, profile = get_components()
+    user_model, profile = get_user_components()
     if not profile:
         raise HTTPException(400, "No profile")
     return CoachService(user_model, profile, build_coach_runtime())
@@ -56,12 +58,28 @@ def _empty_status() -> dict:
     }
 
 
+def _fallback_status(service: CoachService) -> dict:
+    empty = _empty_status()
+    empty["tier"] = service.tier()
+    empty["settings"] = service.get_settings()
+    empty["channel_capabilities"] = service.channel_capabilities()
+    return empty
+
+
 @router.get("/status")
 def get_status():
     try:
-        return _service().build_status()
+        service = _service()
     except HTTPException:
         return _empty_status()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(service.build_status)
+            return future.result(timeout=5)
+    except FuturesTimeoutError:
+        return _fallback_status(service)
+    except Exception:
+        return _fallback_status(service)
 
 
 @router.get("/settings")
@@ -86,7 +104,6 @@ def get_settings():
 def save_settings(req: CoachSettingsRequest):
     service = _service()
     settings = service.save_settings(req.model_dump())
-    service.ensure_notification_schedule()
     return {
         "ok": True,
         "settings": settings,

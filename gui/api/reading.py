@@ -1331,6 +1331,14 @@ class FilteredPracticeRequest(BaseModel):
     practice_mode: str = "single"  # single/mock/targeted
 
 
+class LibraryPassageRequest(BaseModel):
+    exam: str
+    chunk_id: str
+    difficulty: Optional[int] = None
+    question_types: Optional[list[str]] = None
+    practice_mode: str = "targeted"
+
+
 @router.post("/start-filtered")
 def start_filtered_session(req: FilteredPracticeRequest):
     """Start a reading session with multi-dimensional filtering."""
@@ -1342,6 +1350,39 @@ def start_filtered_session(req: FilteredPracticeRequest):
 
     seen = user_model.get_seen_ids(profile.user_id)
     fallback_notes: list[str] = []
+
+    def _load_type_priority_rows(exclude_seen: bool) -> list:
+        if not req.question_types:
+            return []
+        conditions = [
+            "content_type = ?",
+            "exam = ?",
+            "difficulty = ?",
+        ]
+        params = ["reading", req.exam, cefr]
+        if req.subject:
+            conditions.append("subject_category = ?")
+            params.append(req.subject)
+        if req.topic:
+            conditions.append("LOWER(topic) LIKE ?")
+            params.append(f"%{req.topic.lower()}%")
+        like_parts = []
+        for question_type in req.question_types:
+            like_parts.append("question_types_json LIKE ?")
+            params.append(f'%"{question_type}"%')
+        if like_parts:
+            conditions.append("(" + " OR ".join(like_parts) + ")")
+        if exclude_seen and seen:
+            conditions.append(f"chunk_id NOT IN ({','.join('?' * len(seen))})")
+            params.extend(seen)
+        params.append(24)
+        return kb._sql.execute(
+            f"""SELECT rowid, *
+                FROM chunks
+                WHERE {' AND '.join(conditions)}
+                ORDER BY RANDOM() LIMIT ?""",
+            params,
+        ).fetchall()
 
     def _load_filtered_rows(exclude_seen: bool) -> list:
         if req.subject or req.topic:
@@ -1380,33 +1421,46 @@ def start_filtered_session(req: FilteredPracticeRequest):
             query_params["exclude_ids"] = seen
         return kb.get_by_type(**query_params)
 
-    rows = _load_filtered_rows(exclude_seen=True)
+    rows = _load_type_priority_rows(exclude_seen=True) or _load_filtered_rows(exclude_seen=True)
     passages = _coalesce_passages(kb, rows, seen_chunk_ids=seen, limit=5)
     if not passages:
-        rows = _load_filtered_rows(exclude_seen=False)
+        rows = _load_type_priority_rows(exclude_seen=False) or _load_filtered_rows(exclude_seen=False)
         passages = _coalesce_passages(kb, rows, limit=5)
     if not passages and (req.subject or req.topic):
         fallback_notes.append("未找到完全匹配的主题筛选，已放宽到同考试同难度素材。")
-        query_params = {
-            "content_type": "reading",
-            "difficulty": cefr,
-            "exam": req.exam,
-            "limit": 24,
-            "random_order": True,
-        }
-        if seen:
-            query_params["exclude_ids"] = seen
-        rows = kb.get_by_type(**query_params)
+        rows = _load_type_priority_rows(exclude_seen=True)
+        if not rows:
+            query_params = {
+                "content_type": "reading",
+                "difficulty": cefr,
+                "exam": req.exam,
+                "limit": 24,
+                "random_order": True,
+            }
+            if seen:
+                query_params["exclude_ids"] = seen
+            rows = kb.get_by_type(**query_params)
         passages = _coalesce_passages(kb, rows, seen_chunk_ids=seen, limit=5)
         if not passages:
-            rows = kb.get_by_type(
-                content_type="reading",
-                difficulty=cefr,
-                exam=req.exam,
-                limit=24,
-                random_order=True,
-            )
+            rows = _load_type_priority_rows(exclude_seen=False)
+            if not rows:
+                rows = kb.get_by_type(
+                    content_type="reading",
+                    difficulty=cefr,
+                    exam=req.exam,
+                    limit=24,
+                    random_order=True,
+                )
             passages = _coalesce_passages(kb, rows, limit=5)
+
+    if passages and req.question_types:
+        requested = set(req.question_types)
+        passages.sort(
+            key=lambda item: (
+                0 if requested & set(item.question_types or []) else 1,
+                0 if item.questions else 1,
+            )
+        )
 
     if not passages:
         # No passages found - try AI generation if available
@@ -1564,6 +1618,108 @@ def start_filtered_session(req: FilteredPracticeRequest):
         subject=passage_subject,
         exam=req.exam,
         ai_generated=chunk_id.startswith("ai_filtered_"),
+        fallback_reason=" ".join(fallback_notes) if fallback_notes else None,
+        requested_question_types=req.question_types,
+    )
+    payload["word_count"] = passage_word_count
+    payload["difficulty_score"] = req.difficulty
+    payload["practice_mode"] = req.practice_mode
+    return payload
+
+
+@router.post("/start-from-library")
+def start_from_library(req: LibraryPassageRequest):
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+
+    row = kb._sql.execute(
+        "SELECT rowid, * FROM chunks WHERE content_type = 'reading' AND chunk_id = ? LIMIT 1",
+        (req.chunk_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Passage not found")
+
+    passage = _build_passage_record(kb, row)
+    if passage is None:
+        raise HTTPException(404, "Passage not found")
+
+    cefr = _cefr_from_difficulty(req.difficulty, profile.cefr_level or "B2")
+    target_exam = req.exam or passage.exam or profile.target_exam or "general"
+    fallback_notes: list[str] = []
+
+    passage_text = passage.passage_text
+    passage_topic = passage.topic
+    passage_subject = passage.subject
+    passage_difficulty = passage.difficulty or cefr
+    passage_word_count = passage.word_count
+    chunk_id = passage.chunk_id or req.chunk_id
+    questions = list(passage.questions)
+
+    if req.question_types and questions:
+        filtered = [q for q in questions if q.get("type") in req.question_types]
+        if filtered:
+            questions = filtered
+        else:
+            fallback_notes.append("当前素材没有精确匹配题型，已回退为本篇通用题。")
+            questions = questions[: min(len(questions), 5)]
+
+    if not questions and ai:
+        try:
+            from ai.question_distribution import (
+                IELTS_STANDARD_DISTRIBUTION,
+                TOEFL_STANDARD_DISTRIBUTION,
+                generate_questions_with_distribution,
+            )
+
+            if req.question_types:
+                distribution = {qt: 2 for qt in req.question_types}
+            else:
+                distribution = TOEFL_STANDARD_DISTRIBUTION if target_exam == "toefl" else IELTS_STANDARD_DISTRIBUTION
+
+            questions = generate_questions_with_distribution(
+                passage=passage_text,
+                question_types=req.question_types or list(distribution.keys()),
+                distribution=distribution,
+                difficulty=req.difficulty or 5,
+                exam=target_exam,
+                cefr_level=cefr,
+                ai_client=ai,
+            )
+            if questions:
+                _cache_passage_questions(kb, passage, questions)
+        except Exception:
+            questions = []
+
+    _mark_passage_seen(user_model, profile.user_id, passage)
+
+    if not questions:
+        questions = _offline_fallback_questions(passage_text, req.question_types, target_exam)
+        fallback_notes.append("当前使用离线 fallback 题，保证训练不中断。")
+
+    sid = uuid.uuid4().hex[:12]
+    db_sid = user_model.start_session(profile.user_id, "reading")
+    _sessions[sid] = ReadingSession(
+        session_id=sid,
+        user_id=profile.user_id,
+        db_session_id=db_sid,
+        passage=passage_text,
+        chunk_id=chunk_id,
+        questions=questions,
+        exam=target_exam,
+        topic=passage_topic,
+        requested_question_types=req.question_types or [],
+    )
+
+    payload = _build_session_payload(
+        sid=sid,
+        passage_text=passage_text,
+        questions=questions,
+        difficulty=passage_difficulty,
+        topic=passage_topic,
+        subject=passage_subject,
+        exam=target_exam,
+        ai_generated=chunk_id.startswith("ai_"),
         fallback_reason=" ".join(fallback_notes) if fallback_notes else None,
         requested_question_types=req.question_types,
     )

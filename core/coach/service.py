@@ -571,8 +571,9 @@ class CoachService:
         if not isinstance(payload, dict):
             payload = {}
         return {
-            "result_headline": str(payload.get("result_headline", "") or "").strip(),
-            "next_step": str(payload.get("next_step", "") or "").strip(),
+            "result_headline": str(payload.get("result_headline", payload.get("result_card", "")) or "").strip(),
+            "improved_point": str(payload.get("improved_point", "") or "").strip(),
+            "next_step": str(payload.get("next_step", payload.get("tomorrow_reason", "")) or "").strip(),
         }
 
     def _result_card(self, plan_status: str, summary: dict[str, int], completed: int, due_now: int, latest_result_headline: str = "") -> str:
@@ -596,6 +597,15 @@ class CoachService:
         if due_now > 0:
             return "明天继续回来清理复习债务，连续学习会更稳。"
         return "明天回来后，系统会根据你的弱项和完成度重新排任务。"
+
+    def _improved_point(self, summary: dict[str, int], due_now: int, latest_improved_point: str = "") -> str:
+        if latest_improved_point:
+            return latest_improved_point
+        if summary["sessions"] > 0:
+            return "今天已经形成了可复盘记录，下一次训练会更容易对准真实弱项。"
+        if due_now > 0:
+            return "先把复习债务往下压，后面的专项训练会更稳。"
+        return "先启动一次训练，系统才能更准确判断你的薄弱点。"
 
     def _if_skip(self, sessions: int, due_now: int) -> str:
         if sessions > 0:
@@ -698,6 +708,7 @@ class CoachService:
             "today_items": today_summary["items"],
             "today_modes": today_modes,
             "result_card": self._result_card(status, today_summary, completed, due_now, latest_recap.get("result_headline", "")),
+            "improved_point": self._improved_point(today_summary, due_now, latest_recap.get("improved_point", "")),
             "tomorrow_reason": self._tomorrow_reason(status, due_now, latest_recap.get("next_step", "")),
             "if_skip": self._if_skip(today_summary["sessions"], due_now),
         }
@@ -926,8 +937,8 @@ class CoachService:
             "body": payload.get("body", ""),
         }
 
-    def coach_summary(self) -> dict[str, Any]:
-        plan = self.sync_daily_plan()
+    def coach_summary(self, plan: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        plan = plan or self.sync_daily_plan()
         rows = self._db.execute(
             "SELECT summary_json FROM coach_daily_plan WHERE user_id=? ORDER BY plan_date DESC LIMIT 7",
             (self.profile.user_id,),
@@ -949,13 +960,14 @@ class CoachService:
             "review_due_trend": due_trend,
             "weak_area_progress": {"current": list(self.profile.weak_areas or []), "today_focused": weak_done},
             "today_result_card": plan.get("summary", {}).get("result_card", ""),
+            "today_improved_point": plan.get("summary", {}).get("improved_point", ""),
             "tomorrow_reason": plan.get("summary", {}).get("tomorrow_reason", ""),
             "plan_stage": plan.get("stage", "growth"),
             "tier": self.tier(),
         }
 
-    def catch_up_message(self) -> str:
-        plan = self.sync_daily_plan()
+    def catch_up_message(self, plan: Optional[dict[str, Any]] = None) -> str:
+        plan = plan or self.sync_daily_plan()
         preferred_dt = _combine(date.today(), self.get_settings()["preferred_study_time"], DEFAULT_PREFERRED_STUDY_TIME)
         if int(plan.get("summary", {}).get("today_sessions", 0) or 0) == 0 and datetime.now() - preferred_dt > timedelta(hours=RECOVERY_WINDOW_HOURS):
             return "你已经错过了今天的主提醒窗口，但现在补一个最短任务，仍然能把节奏拉回来。"
@@ -963,16 +975,15 @@ class CoachService:
 
     def build_status(self) -> dict[str, Any]:
         plan = self.sync_daily_plan()
-        self.ensure_notification_schedule()
         return {
             "tier": self.tier(),
             "stage": plan.get("stage", "growth"),
             "settings": self.get_settings(),
             "plan": plan,
-            "coach_summary": self.coach_summary(),
+            "coach_summary": self.coach_summary(plan),
             "recent_notifications": self.recent_notifications(),
             "next_notification": self.next_notification(),
-            "catch_up": self.catch_up_message(),
+            "catch_up": self.catch_up_message(plan),
             "channel_capabilities": self.channel_capabilities(),
         }
 

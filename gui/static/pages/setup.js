@@ -21,11 +21,22 @@ export async function render(el) {
   let status = {};
   try { status = await api.get('/api/setup/status'); } catch (e) {}
   const versionMode = status.version_mode || 'opensource';
-  let licStatus = {};
+  const needsDataDirReview = !!status.needs_data_dir_review;
+  let licStatus = {
+    active: !!status.cloud_license_active,
+    days_left: Number(status.license_days_left || 0),
+    activation_available: !!status.activation_available,
+    activation_reason: status.activation_reason || '',
+    needs_reactivation: !!status.needs_reactivation,
+    server_verified: status.server_verified,
+    verification_warning: status.verification_warning || '',
+    ai_mode: status.ai_mode || 'none',
+    ai_ready: !!status.ai_ready,
+    has_self_key: !!status.has_self_key,
+    self_key_backend: status.self_key_backend || '',
+    error: status.license_error || '',
+  };
   let coachCfg = { settings: _defaultCoachSettings(), tier: 'free', channel_capabilities: { desktop: true, bark: false, webhook: false } };
-  if (versionMode === 'cloud') {
-    try { licStatus = await api.get('/api/license/status'); } catch (e) {}
-  }
   try { coachCfg = await api.get('/api/coach/settings'); } catch (e) {}
   const activationAvailable = !!licStatus.activation_available;
   const effectiveAiMode = status.ai_mode || (licStatus.active ? 'cloud' : status.has_self_key ? 'self_key' : 'none');
@@ -42,7 +53,7 @@ export async function render(el) {
     ? '留空可保留当前配置'
     : 'sk-...';
 
-  const isFirstRun = !status.configured;
+  const isFirstRun = !status.configured || needsDataDirReview;
 
   if (!isFirstRun) {
     renderSettings(el, status, licStatus, versionMode, coachCfg);
@@ -57,8 +68,8 @@ export async function render(el) {
 
   el.innerHTML = `
     <div style="max-width:520px;margin:0 auto">
-      <h1 style="margin-bottom:4px">Welcome to English Coach 👋</h1>
-      <p style="margin-bottom:24px">Quick setup to get started</p>
+      <h1 style="margin-bottom:4px">${needsDataDirReview ? '确认数据文件夹' : 'Welcome to English Coach 👋'}</h1>
+      <p style="margin-bottom:24px">${needsDataDirReview ? '检测到新安装版本，请先确认这次继续使用的数据存储位置。' : 'Quick setup to get started'}</p>
 
       <div id="step-indicator" style="display:none;gap:8px;margin-bottom:24px;align-items:center">
         <div class="step-dot active" data-s="1">1</div>
@@ -75,27 +86,27 @@ export async function render(el) {
         <div class="setup-step active" id="step-0">
           <div style="text-align:center;padding:8px 0 20px">
             <div style="font-size:48px;margin-bottom:12px">📦</div>
-            <h2 style="margin-bottom:8px">Do you have existing data?</h2>
-            <p style="color:var(--text-dim);margin-bottom:24px">If you've used English Coach before, you can restore your vocabulary, progress, and settings by pointing to your old data folder.</p>
+            <h2 style="margin-bottom:8px">${needsDataDirReview ? '这次继续使用哪个数据文件夹？' : 'Do you have existing data?'}</h2>
+            <p style="color:var(--text-dim);margin-bottom:24px">${needsDataDirReview ? '产品已更新。请确认继续使用旧数据文件夹，或改成新的数据文件夹。系统会按你这次选择的文件夹继续读取词汇、进度和设置。' : "If you've used English Coach before, you can restore your vocabulary, progress, and settings by pointing to your old data folder."}</p>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
             <button class="btn btn-outline" id="btn-has-data" style="padding:16px;display:flex;flex-direction:column;align-items:center;gap:6px;height:auto">
               <span style="font-size:24px">📂</span>
-              <span style="font-weight:600">Yes, I have data</span>
-              <span style="font-size:12px;color:var(--text-dim)">Restore from existing folder</span>
+              <span style="font-weight:600">${needsDataDirReview ? '选择 / 确认文件夹' : 'Yes, I have data'}</span>
+              <span style="font-size:12px;color:var(--text-dim)">${needsDataDirReview ? 'Use an existing data folder' : 'Restore from existing folder'}</span>
             </button>
             <button class="btn btn-primary" id="btn-no-data" style="padding:16px;display:flex;flex-direction:column;align-items:center;gap:6px;height:auto">
               <span style="font-size:24px">✨</span>
-              <span style="font-weight:600">Start fresh</span>
-              <span style="font-size:12px;opacity:0.8">New user, no prior data</span>
+              <span style="font-weight:600">${needsDataDirReview ? '改用新位置' : 'Start fresh'}</span>
+              <span style="font-size:12px;opacity:0.8">${needsDataDirReview ? 'Choose a new storage location' : 'New user, no prior data'}</span>
             </button>
           </div>
         </div>
 
         <!-- Step 0b: Import existing data -->
         <div class="setup-step" id="step-0b">
-          <h2 style="margin-bottom:8px">📂 Restore Existing Data</h2>
-          <p style="color:var(--text-dim);margin-bottom:20px">Enter the path to your existing data folder. This is the folder that contains <code style="color:var(--accent)">user.db</code>.</p>
+          <h2 style="margin-bottom:8px">📂 ${needsDataDirReview ? '确认数据文件夹' : 'Restore Existing Data'}</h2>
+          <p style="color:var(--text-dim);margin-bottom:20px">${needsDataDirReview ? '请输入你要继续使用的数据目录，或者直接粘贴 <code style="color:var(--accent)">user.db</code> 文件路径。更新后的应用会按这个位置继续读取和保存数据。' : 'Enter the path to your existing data folder. This is the folder that contains <code style="color:var(--accent)">user.db</code>.'}</p>
           <div id="data-dir-hint" style="background:var(--bg3);border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px">
             <div style="color:var(--text-dim);margin-bottom:4px">Default data folder location:</div>
             <div id="default-data-path" style="font-family:monospace;color:var(--accent);word-break:break-all">Loading…</div>
@@ -103,7 +114,7 @@ export async function render(el) {
           <div class="form-group">
             <label>Data folder path</label>
             <input id="inp-restore-dir" type="text" placeholder="e.g. C:\\Users\\you\\Documents\\EnglishCoach\\data" style="font-family:monospace;font-size:13px">
-            <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Paste the full path to your existing data folder. The app will load your vocabulary and progress from there.</div>
+            <div style="font-size:12px;color:var(--text-dim);margin-top:6px">${needsDataDirReview ? '支持填写数据目录，或直接填写 user.db 文件路径。' : 'Paste the full path to your existing data folder. The app will load your vocabulary and progress from there.'}</div>
           </div>
           <div id="restore-msg" style="min-height:20px;margin-bottom:8px"></div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -321,14 +332,23 @@ export async function render(el) {
   }
 
   // Step 0: existing data choice
+  async function loadRestorePath() {
+    try {
+      const current = status.current_data_dir || (await api.get('/api/setup/data_dir')).data_dir;
+      el.querySelector('#default-data-path').textContent = current;
+      el.querySelector('#inp-restore-dir').placeholder = current;
+      if (needsDataDirReview && current) {
+        el.querySelector('#inp-restore-dir').value = current;
+      }
+    } catch {
+      el.querySelector('#default-data-path').textContent = '(unavailable)';
+    }
+  }
+
   el.querySelector('#btn-no-data').addEventListener('click', () => setStep(1));
   el.querySelector('#btn-has-data').addEventListener('click', async () => {
     setStep('0b');
-    try {
-      const r = await api.get('/api/setup/data_dir');
-      el.querySelector('#default-data-path').textContent = r.data_dir;
-      el.querySelector('#inp-restore-dir').placeholder = r.data_dir;
-    } catch { el.querySelector('#default-data-path').textContent = '(unavailable)'; }
+    await loadRestorePath();
   });
 
   el.querySelector('#btn-back-0b').addEventListener('click', () => setStep(0));
@@ -349,7 +369,7 @@ export async function render(el) {
           backend: r.backend || 'deepseek',
           api_key: '',
           content_path: '',
-          data_dir: dir,
+          data_dir: r.data_dir || dir,
         });
         _clearExamCache();
         setStep(5);
@@ -458,6 +478,15 @@ export async function render(el) {
   }
 
   el.querySelector('#btn-go-home').addEventListener('click', () => navigate('home'));
+
+  if (needsDataDirReview) {
+    setStep('0b');
+    loadRestorePath();
+    const msg = el.querySelector('#restore-msg');
+    if (msg) {
+      msg.innerHTML = '<div class="alert alert-info" style="margin-bottom:0">检测到新安装版本，请确认这次继续使用的数据文件夹。</div>';
+    }
+  }
 }
 
 // ── Returning-user settings panel ─────────────────────────────────────────

@@ -1,0 +1,7 @@
+api_key: ''
+backend: deepseek
+data_dir: data
+history_retention_days: 30
+user:
+  name: ''
+  target_exam: general

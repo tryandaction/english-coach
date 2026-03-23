@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
+import urllib.error
 import urllib.request
 import yaml
 from fastapi import APIRouter
@@ -25,6 +27,12 @@ from gui.license import (
 )
 
 router = APIRouter(prefix="/api/license", tags=["license"])
+
+_LICENSE_STATUS_CACHE: dict[str, object] = {
+    "fingerprint": "",
+    "expires_at": 0.0,
+    "value": None,
+}
 
 
 _ENV_KEYS = {
@@ -49,6 +57,50 @@ def _license_file(cfg: dict | None = None) -> Path:
 def _storage_format(cfg: dict | None = None) -> str:
     record = read_license_record(_license_file(cfg).parent)
     return record.format if record else "missing"
+
+
+def _license_cache_fingerprint(cfg: dict | None = None) -> str:
+    cfg = cfg or load_config()
+    license_path = _license_file(cfg)
+    stat = None
+    try:
+        stat = license_path.stat()
+    except FileNotFoundError:
+        stat = None
+    payload = {
+        "data_dir": str(_resolve_data_dir(cfg)),
+        "backend": str(cfg.get("backend", "") or "").strip().lower(),
+        "license_path": str(license_path),
+        "license_exists": bool(stat),
+        "license_mtime_ns": int(stat.st_mtime_ns) if stat else 0,
+        "license_size": int(stat.st_size) if stat else 0,
+        "worker_url": WORKER_URL,
+        "client_token_present": bool(WORKER_CLIENT_TOKEN),
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=True)
+
+
+def _get_cached_license_status(cfg: dict | None = None) -> dict | None:
+    fingerprint = _license_cache_fingerprint(cfg)
+    if (
+        _LICENSE_STATUS_CACHE.get("fingerprint") == fingerprint
+        and float(_LICENSE_STATUS_CACHE.get("expires_at", 0.0) or 0.0) > time.time()
+        and isinstance(_LICENSE_STATUS_CACHE.get("value"), dict)
+    ):
+        return dict(_LICENSE_STATUS_CACHE["value"])  # shallow copy
+    return None
+
+
+def _store_cached_license_status(cfg: dict | None, value: dict) -> None:
+    _LICENSE_STATUS_CACHE["fingerprint"] = _license_cache_fingerprint(cfg)
+    _LICENSE_STATUS_CACHE["expires_at"] = time.time() + 10.0
+    _LICENSE_STATUS_CACHE["value"] = dict(value)
+
+
+def _clear_cached_license_status() -> None:
+    _LICENSE_STATUS_CACHE["fingerprint"] = ""
+    _LICENSE_STATUS_CACHE["expires_at"] = 0.0
+    _LICENSE_STATUS_CACHE["value"] = None
 
 
 def _self_key_status(cfg: dict | None = None) -> dict:
@@ -101,18 +153,39 @@ def _save_proxy_license(
 
 def _post_worker(path: str, body: dict) -> dict:
     payload = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        f"{WORKER_URL.rstrip('/')}{path}",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "X-Worker-Token": WORKER_CLIENT_TOKEN,
-            "User-Agent": "EnglishCoach/2.0",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read())
+    worker_base = WORKER_URL.rstrip("/")
+    last_error = None
+    for timeout in (10, 20, 30):
+        req = urllib.request.Request(
+            f"{worker_base}{path}",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Worker-Token": WORKER_CLIENT_TOKEN,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "application/json,text/plain,*/*",
+                "Origin": worker_base,
+                "Referer": f"{worker_base}/",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                parsed = json.loads(error_body)
+                if isinstance(parsed, dict):
+                    parsed.setdefault("ok", False)
+                    parsed.setdefault("http_status", exc.code)
+                    return parsed
+            except Exception:
+                last_error = exc
+                continue
+        except Exception as exc:
+            last_error = exc
+    raise last_error
 
 
 def _verify_remote(key: str, machine_id: str) -> dict:
@@ -131,6 +204,9 @@ class LicenseRequest(BaseModel):
 
 def build_license_status(cfg: dict | None = None) -> dict:
     cfg = cfg or load_config()
+    cached = _get_cached_license_status(cfg)
+    if cached is not None:
+        return cached
     capability = get_activation_capability()
     data_dir = _resolve_data_dir(cfg)
     record = read_license_record(data_dir)
@@ -162,22 +238,28 @@ def build_license_status(cfg: dict | None = None) -> dict:
         }
 
     if not record:
-        return _base_status()
+        result = _base_status()
+        _store_cached_license_status(cfg, result)
+        return result
 
     local = verify_license_record(record)
     if not local["valid"]:
-        return _base_status(
+        result = _base_status(
             error=local["error"],
             needs_reactivation=local.get("needs_reactivation", False),
         )
+        _store_cached_license_status(cfg, result)
+        return result
 
     remote = _verify_remote(record.key, record.machine_id) if capability["available"] else {"reachable": False}
     if remote.get("reachable"):
         if not remote.get("ok"):
-            return _base_status(
+            result = _base_status(
                 error=remote.get("error", "License 校验失败"),
                 server_verified=True,
             )
+            _store_cached_license_status(cfg, result)
+            return result
         days_left = int(remote.get("days_left", 0))
         verification_warning = ""
         server_verified = True
@@ -187,7 +269,7 @@ def build_license_status(cfg: dict | None = None) -> dict:
         server_verified = False
 
     ai_cfg = get_license_ai_config(data_dir)
-    return _base_status(
+    result = _base_status(
         active=True,
         days_left=days_left,
         mode="cloud",
@@ -195,6 +277,8 @@ def build_license_status(cfg: dict | None = None) -> dict:
         server_verified=server_verified,
         verification_warning=verification_warning,
     )
+    _store_cached_license_status(cfg, result)
+    return result
 
 
 @router.get("/status")
@@ -245,6 +329,7 @@ def activate_license(req: LicenseRequest):
     except Exception:
         pass
 
+    _clear_cached_license_status()
     reset_components()
     return {"ok": True, "days_left": days}
 
@@ -254,5 +339,6 @@ def deactivate_license():
     lf = _license_file()
     if lf.exists():
         lf.unlink()
+    _clear_cached_license_status()
     reset_components()
     return {"ok": True}

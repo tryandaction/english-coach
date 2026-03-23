@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gui import cloud_license_defaults
+from utils.private_paths import cloud_activation_config_candidates
 
 _FILE_SIGN_KEY = b"ec-file-sign-v2-pB4mQx2Lr9Ns7Kv1"
 _LICENSE_RECORD_VERSION = "v2"
@@ -39,11 +40,7 @@ def _candidate_activation_config_paths() -> list[Path]:
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).resolve().parent
         return [base / "cloud_activation_config.json"]
-    root = Path(__file__).resolve().parents[1]
-    return [
-        root / "cloud_activation_config.json",
-        root / "releases" / "cloud_activation_config.json",
-    ]
+    return cloud_activation_config_candidates()
 
 
 def _load_runtime_activation_config() -> dict:
@@ -209,7 +206,7 @@ def verify_license_record(record: LicenseRecord) -> dict:
             return {
                 "valid": False,
                 "days_left": 0,
-                "error": "旧版 License 格式已停用，请重新激活以升级安全记录。",
+                "error": "检测到早期本地激活记录。重新激活后会自动覆盖并升级为当前安全格式。",
                 "needs_reactivation": True,
             }
         return {"valid": False, "days_left": 0, "error": "License 文件格式无效", "needs_reactivation": False}

@@ -23,6 +23,17 @@ const TASKS = {
 let _activePractice = null;
 let _state = null;
 
+function ensureSpeakingShell(el) {
+  let body = el.querySelector('#speaking-body');
+  if (body) return body;
+  el.innerHTML = `
+    <h1>🗣 Speaking Practice</h1>
+    <p>${_activePractice ? escHtml(practiceSummaryText(_activePractice)) : 'Generate a speaking task, type your response, and get AI scoring feedback.'}</p>
+    <div id="speaking-body"></div>
+  `;
+  return el.querySelector('#speaking-body');
+}
+
 function markStartedAt() {
   if (!_state) return;
   _state.started_at = Date.now();
@@ -64,7 +75,8 @@ export async function render(el) {
 }
 
 async function renderTaskView(el, preferred) {
-  const body = el.querySelector('#speaking-body');
+  const body = ensureSpeakingShell(el);
+  if (!body) return;
   const exam = preferred?.exam || 'toefl';
   const taskType = preferred?.task_type || defaultTask(exam);
 
@@ -131,22 +143,26 @@ function renderTaskCards(exam, activeTask) {
 
 async function loadPrompt(el, exam, taskType) {
   const panel = el.querySelector('#speaking-task-panel');
+  if (!panel) return;
   panel.innerHTML = '<div style="text-align:center;padding:30px"><div class="spinner"></div></div>';
 
   try {
     const params = new URLSearchParams({ exam, task_type: taskType });
     const result = await api.get(`/api/speaking/prompt?${params}`);
+    if (window._currentAbortSignal?.aborted || !el.isConnected) return;
     _state = { ...result, practice: _activePractice || null };
     _state.started_at = Date.now();
     _store.set(_state);
     renderPromptShell(el, _state);
   } catch (e) {
+    if (e.name === 'AbortError' || !el.isConnected) return;
     panel.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
 function renderPromptShell(el, state) {
   const body = el.querySelector('#speaking-task-panel');
+  if (!body) return;
   const exam = state.exam || 'toefl';
   const taskLabel = state.task_label || state.task_type;
   const criteria = state.scoring_criteria || 'Delivery, structure, vocabulary';
@@ -227,8 +243,10 @@ function renderPromptContent(state) {
 
 async function submitResponse(el) {
   const body = el.querySelector('#speaking-task-panel');
+  if (!body) return;
   const ta = body.querySelector('#speaking-response');
   const feedback = body.querySelector('#speaking-feedback');
+  if (!ta || !feedback) return;
   const transcript = ta.value.trim();
   if (countWords(transcript) < 20) {
     feedback.innerHTML = '<div class="alert alert-warn">Please enter at least 20 words before submitting.</div>';
@@ -248,12 +266,15 @@ async function submitResponse(el) {
       sample_response: _state.sample_response || null,
       duration_sec: elapsedSeconds(),
     });
+    if (window._currentAbortSignal?.aborted || !el.isConnected) return;
     renderFeedback(feedback, result);
     _store.clear();
   } catch (e) {
+    if (e.name === 'AbortError' || !el.isConnected) return;
     feedback.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   } finally {
-    body.querySelector('#btn-submit-speaking').disabled = false;
+    const submitBtn = body.querySelector('#btn-submit-speaking');
+    if (submitBtn) submitBtn.disabled = false;
   }
 }
 

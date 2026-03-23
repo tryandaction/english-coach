@@ -92,6 +92,7 @@ function dayCard(day) {
           <div class="card" style="background:var(--bg2);padding:14px">
             <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">当天结果</div>
             <div style="font-size:13px;color:var(--text-dim);line-height:1.7;margin-bottom:10px">${escHtml(summary.result_card || '')}</div>
+            ${summary.improved_point ? `<div style="font-size:13px;color:var(--text-dim);line-height:1.7;margin-bottom:10px">进步点：${escHtml(summary.improved_point)}</div>` : ''}
             <div style="display:flex;gap:8px;flex-wrap:wrap">
               <span class="tag">训练 ${summary.today_sessions || 0} 次</span>
               <span class="tag">学习 ${summary.today_minutes || 0} 分钟</span>
@@ -173,10 +174,14 @@ function renderSessionDetail(mode, content) {
 }
 
 function renderRecap(content) {
-  if (!content?.result_headline && !content?.next_step) return '';
+  const headline = content?.result_headline || content?.result_card || '';
+  const improved = content?.improved_point || '';
+  const nextStep = content?.next_step || content?.tomorrow_reason || '';
+  if (!headline && !improved && !nextStep) return '';
   return `
-    ${content.result_headline ? `<div style="margin-bottom:4px;color:var(--text)">${escHtml(content.result_headline)}</div>` : ''}
-    ${content.next_step ? `<div style="margin-bottom:6px">下一步：${escHtml(content.next_step)}</div>` : ''}
+    ${headline ? `<div style="margin-bottom:4px;color:var(--text)">${escHtml(headline)}</div>` : ''}
+    ${improved ? `<div style="margin-bottom:4px">进步点：${escHtml(improved)}</div>` : ''}
+    ${nextStep ? `<div style="margin-bottom:6px">下一步：${escHtml(nextStep)}</div>` : ''}
   `;
 }
 

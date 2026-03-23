@@ -1,7 +1,7 @@
-English Coach Open Source - Release Notes
-=========================================
+English Coach Desktop - Release Notes
+=====================================
 
-This release is for the Open Source desktop edition.
+This release note file is shared by both desktop editions.
 
 What you can test without any API key
 -------------------------------------
@@ -16,17 +16,22 @@ What you can test without any API key
 Release smoke
 -------------
 
+- Rebuild artifacts first with `python build_opensource.py`
+- This updates the exe, setup installer, and zip bundle together
 - Portable exe startup is covered by the release smoke script
 - Setup installer startup is also covered
 - First launch Setup, offline Reading, offline Listening, and result writeback are all verified
 - Run `python scripts/smoke_test_release.py --keep-temp` before publishing a new release
 
-What needs your own API key
----------------------------
+What needs AI access
+--------------------
 
 - Chat
 - Writing feedback
 - Speaking scoring
+
+In Open Source, this means your own API key.
+In Cloud, this can come from License activation or your own API key.
 
 Supported providers
 -------------------

@@ -20,6 +20,8 @@ let _autoTts = (() => {
 let _cardContainer = null;
 let _currentCard = null;
 let _builtinSyncPromise = null;
+let _builtinSyncResolved = false;
+let _autoTtsStamp = { key: '', ts: 0 };
 
 const _vocabStore = {
   get: () => { try { return JSON.parse(localStorage.getItem('vocab_session')); } catch { return null; } },
@@ -49,12 +51,18 @@ async function loadStudyOverview() {
 }
 
 function ensureBuiltinSync() {
-  if (localStorage.getItem(BUILTIN_SYNC_KEY) === 'done') return null;
+  if (_builtinSyncResolved || localStorage.getItem(BUILTIN_SYNC_KEY) === 'done') {
+    _builtinSyncResolved = true;
+    return null;
+  }
   if (_builtinSyncPromise) return _builtinSyncPromise;
 
   _builtinSyncPromise = api.post('/api/vocab/ingest_builtin', {})
     .then((result) => {
-      if (result?.ok) localStorage.setItem(BUILTIN_SYNC_KEY, 'done');
+      if (result?.ok) {
+        localStorage.setItem(BUILTIN_SYNC_KEY, 'done');
+        _builtinSyncResolved = true;
+      }
       return result;
     })
     .catch(() => null)
@@ -125,9 +133,16 @@ function bindAutoTtsButton(root) {
 
 function maybeAutoReadCurrentWord(revealed) {
   if (_autoTts && !revealed && _currentCard?.word) {
-    // Preload first, then play immediately
-    ttsPreload(_currentCard.word);
-    setTimeout(() => tts(_currentCard.word), 50);
+    const word = String(_currentCard.word || '').trim();
+    if (!word) return;
+    const key = `${_sid || 'none'}:${word}`;
+    const now = Date.now();
+    if (_autoTtsStamp.key === key && now - _autoTtsStamp.ts < 3000) return;
+    _autoTtsStamp = { key, ts: now };
+    ttsPreload(word);
+    setTimeout(() => {
+      if (_currentCard?.word === word && !_revealed) tts(word);
+    }, 50);
   }
 }
 
@@ -189,8 +204,8 @@ async function renderStudyTab(el, content) {
   if (api.isAborted() || !el.isConnected) return;
 
   if (syncPromise) {
-    syncPromise.then(() => {
-      if (_currentTab === 'study' && el.isConnected) {
+    syncPromise.then((result) => {
+      if (result?.ok && _currentTab === 'study' && el.isConnected) {
         renderStudyTab(el, content);
       }
     });

@@ -10,11 +10,17 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from core.coach.service import CoachNotificationDispatcher, CoachService
+from core.ingestion.pipeline import IngestionPipeline
+from core.knowledge_base.store import KnowledgeBase
 from core.srs.engine import SM2Engine
 from core.user_model.profile import UserModel
 from core.vocab.catalog import should_include_builtin_book, sync_builtin_vocabulary
+from gui.api import mock_exam as mock_exam_api
+from gui.api import reading as reading_api
 from gui.api import listening as listening_api
 from gui.api.listening import _sessions as listening_sessions, start_listening
+from gui.api.mock_exam import CompleteSectionRequest, MockExamSession, _complete_section, _generate_score_report
+from gui.api.reading import FilteredPracticeRequest, _sessions as reading_sessions, start_filtered_session
 from gui.api.speaking import _rotated_choice
 from gui.api.writing import _pick_task_type as _pick_writing_task_type, _rotate_prompt_list
 from gui.api.speaking import _pick_task_type as _pick_speaking_task_type
@@ -138,15 +144,54 @@ class CoachServiceContractTests(unittest.TestCase):
                 600,
                 4,
                 0.75,
-                content_json='{"result_headline":"阅读完成：3/4 题正确 · Factual","next_step":"明天再做 1 轮 Factual。"}',
+                content_json='{"result_headline":"阅读完成：3/4 题正确 · Factual","improved_point":"Factual 题已经开始稳定。","next_step":"明天再做 1 轮 Factual。"}',
             )
             plan = service.sync_daily_plan()
             self.assertEqual(plan["summary"]["result_card"], "阅读完成：3/4 题正确 · Factual")
+            self.assertEqual(plan["summary"]["improved_point"], "Factual 题已经开始稳定。")
             self.assertEqual(plan["summary"]["tomorrow_reason"], "明天再做 1 轮 Factual。")
         finally:
             user_model._db.close()
             srs._db.close()
             tmpdir.cleanup()
+
+    def test_listening_priority_builtin_question_types_are_available_offline(self) -> None:
+        cases = [
+            ("toefl", "conversation", "detail"),
+            ("toefl", "monologue", "organization"),
+            ("ielts", "conversation", "multiple_choice"),
+            ("ielts", "conversation", "form_completion"),
+        ]
+        for exam, dialogue_type, question_type in cases:
+            with self.subTest(exam=exam, dialogue_type=dialogue_type, question_type=question_type):
+                tmpdir = tempfile.TemporaryDirectory()
+                db_path = f"{tmpdir.name}/user.db"
+                srs = SM2Engine(db_path)
+                user_model = UserModel(db_path)
+                profile = user_model.create_profile(name="Listener", target_exam=exam)
+                components = (None, srs, user_model, None, profile)
+                try:
+                    with patch("gui.api.listening.get_components", return_value=components), patch(
+                        "gui.api.listening._synthesize_audio",
+                        new=AsyncMock(return_value=(None, [])),
+                    ), patch(
+                        "gui.api.listening._maybe_replenish",
+                        new=AsyncMock(return_value=None),
+                    ):
+                        result = asyncio.run(
+                            start_listening(exam=exam, dialogue_type=dialogue_type, question_type=question_type)
+                        )
+                    self.assertEqual(result["question_type"], question_type)
+                    self.assertIn(question_type, result["question_types"])
+                    self.assertEqual(result["source"], "builtin")
+                finally:
+                    listening_sessions.clear()
+                    if listening_api._pool_db is not None:
+                        listening_api._pool_db.close()
+                        listening_api._pool_db = None
+                    user_model._db.close()
+                    srs._db.close()
+                    tmpdir.cleanup()
 
     def test_listening_start_honors_requested_question_type_when_builtin_exists(self) -> None:
         tmpdir = tempfile.TemporaryDirectory()
@@ -174,6 +219,88 @@ class CoachServiceContractTests(unittest.TestCase):
             if listening_api._pool_db is not None:
                 listening_api._pool_db.close()
                 listening_api._pool_db = None
+            user_model._db.close()
+            srs._db.close()
+            tmpdir.cleanup()
+
+    def test_reading_priority_question_types_are_available_offline(self) -> None:
+        cases = [
+            ("toefl", "factual"),
+            ("toefl", "inference"),
+            ("ielts", "tfng"),
+            ("ielts", "matching_headings"),
+        ]
+        for exam, question_type in cases:
+            with self.subTest(exam=exam, question_type=question_type):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    data_dir = Path(tmpdir)
+                    kb = KnowledgeBase(data_dir)
+                    chunks = IngestionPipeline().ingest_directory(Path("content/reading"))
+                    kb.add_chunks(chunks)
+                    db_path = str(data_dir / "user.db")
+                    srs = SM2Engine(db_path)
+                    user_model = UserModel(db_path)
+                    profile = user_model.create_profile(name="Reader", target_exam=exam)
+                    components = (kb, srs, user_model, None, profile)
+                    try:
+                        with patch("gui.api.reading.get_components", return_value=components):
+                            result = start_filtered_session(
+                                FilteredPracticeRequest(
+                                    exam=exam,
+                                    difficulty=5,
+                                    question_types=[question_type],
+                                    practice_mode="targeted",
+                                )
+                            )
+                        self.assertIn(question_type, result["question_types"])
+                        self.assertEqual(result["requested_question_types"], [question_type])
+                        self.assertNotIn("离线 fallback", str(result.get("fallback_reason", "")))
+                        session = reading_sessions[result["session_id"]]
+                        self.assertTrue(session.questions)
+                        self.assertTrue(all(q.get("type") == question_type for q in session.questions))
+                    finally:
+                        reading_sessions.clear()
+                        user_model._db.close()
+                        srs._db.close()
+                        kb._sql.close()
+
+    def test_mock_exam_section_and_report_include_improved_point(self) -> None:
+        tmpdir = tempfile.TemporaryDirectory()
+        db_path = f"{tmpdir.name}/user.db"
+        srs = SM2Engine(db_path)
+        user_model = UserModel(db_path)
+        profile = user_model.create_profile(name="Mocker", target_exam="toefl")
+        db_sid = user_model.start_session(profile.user_id, "mock_toefl")
+        session = MockExamSession(
+            session_id="mock123",
+            db_session_id=db_sid,
+            user_id=profile.user_id,
+            exam="toefl",
+            sections=[{"section": "reading", "time_limit": 10}, {"section": "listening", "time_limit": 10}],
+        )
+        try:
+            enriched = _complete_section(
+                session,
+                CompleteSectionRequest(section_index=0, result={"correct": 7, "total": 10, "source": "reading"}),
+            )
+            self.assertTrue(enriched["sections"][0]["summary"]["result_card"])
+            self.assertTrue(enriched["sections"][0]["summary"]["improved_point"])
+            self.assertTrue(enriched["sections"][0]["summary"]["tomorrow_reason"])
+
+            session.current_section = 2
+            session.completed_sections[1] = {"correct": 4, "total": 10, "source": "listening"}
+            with patch("gui.api.mock_exam.get_components", return_value=(None, srs, user_model, None, profile)):
+                report = _generate_score_report(session)
+            self.assertTrue(report["result_card"])
+            self.assertTrue(report["improved_point"])
+            self.assertTrue(report["tomorrow_reason"])
+            row = user_model._db.execute(
+                "SELECT content_json FROM sessions WHERE session_id=?",
+                (db_sid,),
+            ).fetchone()
+            self.assertIn("improved_point", row["content_json"])
+        finally:
+            mock_exam_api._mock_sessions.clear()
             user_model._db.close()
             srs._db.close()
             tmpdir.cleanup()
@@ -232,8 +359,9 @@ class PromptRotationTests(unittest.TestCase):
 
 class EmptyEndpointContractTests(unittest.TestCase):
     def test_coach_and_history_are_empty_instead_of_error_without_profile(self) -> None:
+        user_components = (None, None)
         components = (None, None, None, None, None)
-        with patch("gui.api.coach.get_components", return_value=components), patch(
+        with patch("gui.api.coach.get_user_components", return_value=user_components), patch(
             "gui.api.history.get_components",
             return_value=components,
         ):
@@ -245,6 +373,35 @@ class EmptyEndpointContractTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200)
         self.assertEqual(coach.json()["plan"]["tasks"], [])
         self.assertEqual(history.json()["days"], [])
+
+    def test_coach_settings_endpoint_uses_lightweight_user_components(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = f"{tmpdir}/user.db"
+            srs = SM2Engine(db_path)
+            user_model = UserModel(db_path)
+            profile = user_model.create_profile(name="Coach", target_exam="toefl")
+            with patch("gui.api.coach.get_user_components", return_value=(user_model, profile)), patch(
+                "gui.api.coach.build_coach_runtime",
+                return_value={},
+            ):
+                client = TestClient(create_app())
+                response = client.post(
+                    "/api/coach/settings",
+                    json={
+                        "preferred_study_time": "20:00",
+                        "quiet_hours": {"start": "22:30", "end": "08:00"},
+                        "reminder_level": "basic",
+                        "desktop_enabled": False,
+                        "bark_enabled": False,
+                        "webhook_enabled": False,
+                        "bark_key": "",
+                        "webhook_url": "",
+                    },
+                )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["ok"])
+            user_model._db.close()
+            srs._db.close()
 
 
 if __name__ == "__main__":

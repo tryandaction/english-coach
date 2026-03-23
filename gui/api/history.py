@@ -7,6 +7,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
+from core.coach.service import CoachService
+from gui.coach_runtime import build_coach_runtime
 from gui.deps import get_components, load_config
 
 router = APIRouter(prefix="/api/history", tags=["history"])
@@ -124,6 +126,11 @@ def daily_history(limit_days: int = 14):
     if not profile:
         return {"days": []}
 
+    try:
+        CoachService(user_model, profile, build_coach_runtime()).sync_daily_plan()
+    except Exception:
+        pass
+
     plan_rows = user_model._db.execute(
         """SELECT plan_date, stage, status, plan_json, summary_json
            FROM coach_daily_plan
@@ -198,6 +205,7 @@ def daily_history(limit_days: int = 14):
               "today_minutes": total_minutes,
               "today_items": total_items,
               "result_card": "这是升级前的历史训练记录，当前没有对应的 coach 计划快照。",
+              "improved_point": "这一天已经留下了可复盘的训练记录，但还没有同步到新版 coach 计划快照。",
               "tomorrow_reason": "",
           }
           plan = {"tasks": []}

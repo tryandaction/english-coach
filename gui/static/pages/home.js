@@ -7,16 +7,16 @@ export async function render(el) {
   let licStatus = {};
 
   try {
-    setupStatus = await api.get('/api/setup/status');
+    const setupPromise = api.get('/api/setup/status');
+    const progressPromise = api.get('/api/progress');
+    const coachPromise = api.get('/api/coach/status').catch(() => ({}));
+    setupStatus = await setupPromise;
     if (window._currentAbortSignal?.aborted || !el.isConnected) return;
-    progress = await api.get('/api/progress');
+    const licensePromise = (setupStatus.version_mode || 'opensource') === 'cloud'
+      ? api.get('/api/license/status').catch(() => ({}))
+      : Promise.resolve({});
+    [progress, coach, licStatus] = await Promise.all([progressPromise, coachPromise, licensePromise]);
     if (window._currentAbortSignal?.aborted || !el.isConnected) return;
-    coach = await api.get('/api/coach/status').catch(() => ({}));
-    if (window._currentAbortSignal?.aborted || !el.isConnected) return;
-    if ((setupStatus.version_mode || 'opensource') === 'cloud') {
-      licStatus = await api.get('/api/license/status').catch(() => ({}));
-      if (window._currentAbortSignal?.aborted || !el.isConnected) return;
-    }
   } catch (e) {
     if (e.name === 'AbortError' || !el.isConnected) return;
     renderError(el, e.message, () => render(el));
@@ -197,10 +197,14 @@ function renderCoachPanel(plan, coach, data) {
           : '<div class="alert alert-info">今天还没有生成 coach 计划，先去做一次练习，系统会开始跟踪你的节奏。</div>'}
       </div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:14px">
         <div class="card" style="background:var(--bg2);padding:16px">
-          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">做完后能看到什么</div>
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">这次做了什么</div>
           <div style="font-size:14px;line-height:1.7">${escHtml(summary.result_card || '完成任意一个任务后，这里会显示当天结果感。')}</div>
+        </div>
+        <div class="card" style="background:var(--bg2);padding:16px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">哪一点进步了</div>
+          <div style="font-size:14px;line-height:1.7">${escHtml(summary.improved_point || '完成一次训练后，这里会显示今天最值得保留的进步。')}</div>
         </div>
         <div class="card" style="background:var(--bg2);padding:16px">
           <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:6px">明天为什么还要回来</div>

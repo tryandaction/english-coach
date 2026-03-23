@@ -85,12 +85,12 @@ function renderActive(body, status) {
 
 function renderNeedsReactivation(body, status) {
   body.innerHTML += `
-    <div class="alert alert-error">${escHtml(status.error || '当前 License 需要重新激活后才能恢复稳定可用。')}</div>
+    <div class="alert alert-warn">${escHtml(status.error || '检测到早期本地记录，重新激活后会自动覆盖为当前安全格式。')}</div>
     <div class="card" style="margin-bottom:16px">
       <h3>为什么要重新激活</h3>
       <div style="font-size:14px;line-height:1.7;color:var(--text)">
-        <div>1. 当前本地记录不是可稳定恢复 Cloud AI 的状态。</div>
-        <div>2. 重新激活后会写入新的安全格式，重启后的恢复能力会更可靠。</div>
+        <div>1. 当前检测到的是早期本地激活记录，不影响你重新激活。</div>
+        <div>2. 重新激活后会直接覆盖为当前安全格式，后续恢复会更稳定。</div>
         <div>3. 如果你已经配置了自带 Key，系统会在重新激活前继续使用自带 Key 模式。</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
@@ -178,7 +178,7 @@ function summaryLine(status, selfKeySummary) {
     return `Cloud License 已激活并通过最近一次服务器校验。${selfKeySummary}`;
   }
   if (status.needs_reactivation) {
-    return `当前 Cloud License 记录需要重新激活。${selfKeySummary}`;
+    return `检测到早期本地 License 记录，重新激活后会自动升级。${selfKeySummary}`;
   }
   if (!status.activation_available) {
     return `当前构建没有可用的激活服务。${selfKeySummary}`;
