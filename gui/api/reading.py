@@ -887,14 +887,15 @@ async def _maybe_replenish(exam: str, cefr: str) -> None:
 async def seed_pool_on_startup() -> None:
     """Pre-generate reading sessions on startup using user's exam/level."""
     try:
-        from gui.deps import get_components
-        _, _, _, _, profile = get_components()
-        target_exam = (profile.target_exam or "general").lower() if profile else "general"
-        cefr = (profile.cefr_level or "B1") if profile else "B1"
+        from gui.deps import load_config
+        cfg = load_config() or {}
+        user_cfg = cfg.get("user", {}) if isinstance(cfg.get("user"), dict) else {}
+        target_exam = str(user_cfg.get("target_exam", "") or "general").lower()
+        cefr = str(cfg.get("cefr_level", "") or user_cfg.get("cefr_level", "") or "B1")
     except Exception:
         target_exam = "general"
         cefr = "B1"
-    asyncio.create_task(_replenish_pool(target_exam, cefr))
+    await _replenish_pool(target_exam, cefr)
 
 
 @dataclass

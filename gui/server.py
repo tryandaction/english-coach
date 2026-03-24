@@ -6,10 +6,21 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 import asyncio
+import threading
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+
+
+def _run_async_background(coro_factory) -> None:
+    def _runner() -> None:
+        try:
+            asyncio.run(coro_factory())
+        except Exception:
+            pass
+
+    threading.Thread(target=_runner, daemon=True).start()
 
 
 @asynccontextmanager
@@ -18,8 +29,8 @@ async def _lifespan(app: FastAPI):
         from gui.api.reading import seed_pool_on_startup as seed_reading_pool
         from gui.api.listening import seed_pool_on_startup as seed_listening_pool
 
-        asyncio.create_task(seed_reading_pool())
-        asyncio.create_task(seed_listening_pool())
+        _run_async_background(seed_reading_pool)
+        _run_async_background(seed_listening_pool)
     except Exception:
         pass
     yield  # Server runs here

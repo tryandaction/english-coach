@@ -92,6 +92,20 @@ _LOADING_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+def _find_existing_server(candidates: list[int]) -> int | None:
+    import urllib.request
+
+    for port in candidates:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1.5) as resp:
+                if resp.status == 200:
+                    _log(f"Reusing existing healthy server on port {port}")
+                    return port
+        except Exception:
+            continue
+    return None
+
+
 def _find_free_port(candidates: list[int]) -> int:
     """Find a free port from candidates, or any free port if all fail."""
     import random
@@ -200,27 +214,38 @@ def main() -> None:
     if ready_file:
         _log(f"Ready file configured: {ready_file}")
 
+    existing_port = _find_existing_server([8765, 8766, 8767, 8768, 8769, 8770])
+    if existing_port:
+        port = existing_port
+        server_ready = True
+        server_thread = None
+        _log(f"Using existing server on port {port}")
+    else:
+        server_ready = False
+        server_thread = None
+
     # Find a free port
-    _log("Finding free port...")
-    try:
-        port = _find_free_port([8765, 8766, 8767, 8768, 8769, 8770])
-        _log(f"Selected port: {port}")
-    except Exception as e:
-        _log(f"CRITICAL ERROR finding port: {e}")
-        if no_webview:
-            _write_probe_file(
-                ready_file,
-                {
-                    "status": "failed",
-                    "stage": "port_selection",
-                    "error": str(e),
-                    "log_path": _LOG,
-                },
-            )
-            raise SystemExit(1)
-        # Show error and exit
-        import webview
-        error_html = f"""<!DOCTYPE html>
+    if not server_ready:
+        _log("Finding free port...")
+        try:
+            port = _find_free_port([8765, 8766, 8767, 8768, 8769, 8770])
+            _log(f"Selected port: {port}")
+        except Exception as e:
+            _log(f"CRITICAL ERROR finding port: {e}")
+            if no_webview:
+                _write_probe_file(
+                    ready_file,
+                    {
+                        "status": "failed",
+                        "stage": "port_selection",
+                        "error": str(e),
+                        "log_path": _LOG,
+                    },
+                )
+                raise SystemExit(1)
+            # Show error and exit
+            import webview
+            error_html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">
 <style>
@@ -239,15 +264,15 @@ def main() -> None:
   </div>
 </body>
 </html>"""
-        webview.create_window("English Coach - 错误", html=error_html, width=500, height=300)
-        webview.start()
-        return
+            webview.create_window("English Coach - 错误", html=error_html, width=500, height=300)
+            webview.start()
+            return
 
-    # Start server in background thread
-    _log("Starting server thread...")
-    server_thread = threading.Thread(target=_start_server, args=(port,), daemon=True)
-    server_thread.start()
-    _log("Server thread started")
+        # Start server in background thread
+        _log("Starting server thread...")
+        server_thread = threading.Thread(target=_start_server, args=(port,), daemon=True)
+        server_thread.start()
+        _log("Server thread started")
 
     try:
         start_coach_scheduler()
@@ -266,28 +291,28 @@ def main() -> None:
     app_url = f"http://127.0.0.1:{port}/"
     _log(f"Waiting for server at {health_url}")
 
-    server_ready = False
-    max_attempts = 60  # 60 attempts × 0.5s = 30 seconds max
+    if not server_ready:
+        max_attempts = 90  # 90 attempts × 0.5s = 45 seconds max
 
-    for i in range(max_attempts):
-        try:
-            with urllib.request.urlopen(health_url, timeout=1.0) as r:
-                if r.status == 200:
-                    elapsed = (i + 1) * 0.5
-                    _log(f"✓ Server ready after {i+1} attempts ({elapsed:.1f}s)")
-                    server_ready = True
-                    break
-        except urllib.error.URLError as e:
-            # Connection refused is expected while server is starting
-            if i == 0 or (i + 1) % 10 == 0:
-                _log(f"Attempt {i+1}/60: {type(e).__name__}")
-        except Exception as e:
-            _log(f"Attempt {i+1}/60: Unexpected error: {type(e).__name__}: {e}")
+        for i in range(max_attempts):
+            try:
+                with urllib.request.urlopen(health_url, timeout=3.0) as r:
+                    if r.status == 200:
+                        elapsed = (i + 1) * 0.5
+                        _log(f"✓ Server ready after {i+1} attempts ({elapsed:.1f}s)")
+                        server_ready = True
+                        break
+            except urllib.error.URLError as e:
+                # Connection refused is expected while server is starting
+                if i == 0 or (i + 1) % 10 == 0:
+                    _log(f"Attempt {i+1}/{max_attempts}: {type(e).__name__}")
+            except Exception as e:
+                _log(f"Attempt {i+1}/{max_attempts}: Unexpected error: {type(e).__name__}: {e}")
 
-        time.sleep(0.5)
+            time.sleep(0.5)
 
     if not server_ready:
-        _log("✗ ERROR: Server failed to start after 30 seconds")
+        _log("✗ ERROR: Server failed to start after readiness timeout")
         _log(f"Check log file for details: {_LOG}")
         if no_webview:
             _write_probe_file(

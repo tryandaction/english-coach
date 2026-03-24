@@ -546,10 +546,11 @@ async def seed_pool_on_startup() -> None:
     """Pre-synthesise sessions in the background so first click is instant.
     Launches one concurrent task per (exam, dtype) combo that needs filling."""
     try:
-        from gui.deps import get_components
-        _, _, _, _, profile = get_components()
-        target_exam = (profile.target_exam or "general").lower() if profile else "general"
-        cefr = (profile.cefr_level or "B1") if profile else "B1"
+        from gui.deps import load_config
+        cfg = load_config() or {}
+        user_cfg = cfg.get("user", {}) if isinstance(cfg.get("user"), dict) else {}
+        target_exam = str(user_cfg.get("target_exam", "") or "general").lower()
+        cefr = str(cfg.get("cefr_level", "") or user_cfg.get("cefr_level", "") or "B1")
     except Exception:
         target_exam = "general"
         cefr = "B1"
@@ -569,10 +570,14 @@ async def seed_pool_on_startup() -> None:
         if combo not in priority:
             priority.append(combo)
 
-    # Launch one independent background task per combo — they run concurrently
+    coros = []
     for exam, dtype in priority:
         if _pool_count(exam, dtype) < _POOL_TARGET:
-            asyncio.create_task(_replenish_pool(exam, dtype, cefr))
+            coros.append(_replenish_pool(exam, dtype, cefr))
+        if len(coros) >= 4:
+            break
+    if coros:
+        await asyncio.gather(*coros, return_exceptions=True)
 
 
 # ── API endpoints ─────────────────────────────────────────────────────────────
