@@ -2,7 +2,9 @@
 """
 Build script for english-coach CLOUD version (license-based with cloud API).
 Usage: python build_cloud.py
-Output: releases/english-coach-cloud.exe
+Output:
+- releases/english-coach-cloud.exe (portable onefile)
+- releases/english-coach-cloud-installer/ (installer payload onedir)
 
 Activation config resolution priority:
 1. EC_WORKER_URL + EC_WORKER_CLIENT_TOKEN
@@ -32,9 +34,12 @@ RELEASE_CONFIG_FILE = ROOT / "release_tooling" / "config.release.yaml"
 RELEASE_CLOUD_CONFIG = ROOT / "releases" / "cloud_activation_config.json"
 SYNC_RELEASE_DOCS = ROOT / "scripts" / "sync_release_docs.py"
 INSTALLER_SCRIPT = ROOT / "release_tooling" / "installers" / "installer_cloud.iss"
+PORTABLE_SPEC = ROOT / "release_tooling" / "specs" / "english_coach_cloud.spec"
+INSTALLER_SPEC = ROOT / "release_tooling" / "specs" / "english_coach_cloud_installer.spec"
 BUILD_LOCK_FILE = ROOT / ".build_release.lock"
 ZIP_NAME = "english-coach-v2.0.0-cloud.zip"
 ZIP_ROOT = "english-coach-cloud"
+INSTALLER_PAYLOAD_DIRNAME = "english-coach-cloud-installer"
 ZIP_FILES = [
     ".env.example",
     ".env.template",
@@ -151,6 +156,9 @@ def _build_installer(releases_dir: Path) -> Path | None:
     if not iscc:
         print("Skipped installer build: Inno Setup compiler not found")
         return None
+    payload_dir = releases_dir / INSTALLER_PAYLOAD_DIRNAME
+    if not payload_dir.exists():
+        raise FileNotFoundError(f"Installer payload not found: {payload_dir}")
     print(f"Building installer with: {iscc}")
     subprocess.run([iscc, str(INSTALLER_SCRIPT)], cwd=str(ROOT), check=True)
     installer_path = releases_dir / "english-coach-cloud-setup.exe"
@@ -233,6 +241,22 @@ class _BuildLock:
                 pass
 
 
+def _run_pyinstaller(spec_path: Path, releases_dir: Path, work_dir: Path) -> None:
+    work_dir.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--clean",
+        "--noconfirm",
+        "--distpath", str(releases_dir),
+        "--workpath", str(work_dir),
+        str(spec_path),
+    ]
+    print(f"Running: {' '.join(cmd)}\n")
+    result = subprocess.run(cmd, cwd=str(ROOT))
+    if result.returncode != 0:
+        raise SystemExit(f"Build FAILED for spec: {spec_path.name}")
+
+
 def main():
     print("=== english-coach CLOUD build ===")
     print(f"Python: {sys.executable}")
@@ -274,6 +298,10 @@ def main():
             # Ensure releases dir exists
             releases_dir = ROOT / "releases"
             releases_dir.mkdir(exist_ok=True)
+            installer_payload_dir = releases_dir / INSTALLER_PAYLOAD_DIRNAME
+            if installer_payload_dir.exists():
+                shutil.rmtree(installer_payload_dir)
+                print(f"Cleaned previous installer payload: {installer_payload_dir.name}")
             (releases_dir / "config.yaml").write_text(release_config, encoding="utf-8")
             subprocess.run([sys.executable, str(SYNC_RELEASE_DOCS)], cwd=str(ROOT), check=True)
             print("Synced release docs into releases/")
@@ -286,20 +314,25 @@ def main():
             )
             print(f"Wrote {RELEASE_CLOUD_CONFIG.name} for cloud packaging")
 
-            # Run PyInstaller with cloud spec
-            cmd = [
-                sys.executable, "-m", "PyInstaller",
-                "--clean",
-                "--noconfirm",
-                "--distpath", str(releases_dir),
-                str(ROOT / "release_tooling" / "specs" / "english_coach_cloud.spec"),
-            ]
-            print(f"Running: {' '.join(cmd)}\n")
-            result = subprocess.run(cmd, cwd=str(ROOT))
+            # Portable onefile stays unchanged for direct distribution.
+            _run_pyinstaller(
+                PORTABLE_SPEC,
+                releases_dir,
+                ROOT / "build" / "pyinstaller-cloud-portable",
+            )
+            portable_exe_path = releases_dir / ("english-coach-cloud.exe" if sys.platform == "win32" else "english-coach-cloud")
+            if not portable_exe_path.exists():
+                raise FileNotFoundError(f"Portable executable not found: {portable_exe_path}")
 
-            if result.returncode != 0:
-                print("\nBuild FAILED.")
-                sys.exit(1)
+            # Installer gets a dedicated onedir payload to reduce cold-start cost.
+            _run_pyinstaller(
+                INSTALLER_SPEC,
+                releases_dir,
+                ROOT / "build" / "pyinstaller-cloud-installer",
+            )
+            installer_payload_exe = installer_payload_dir / ("english-coach-cloud.exe" if sys.platform == "win32" else "english-coach-cloud")
+            if not installer_payload_exe.exists():
+                raise FileNotFoundError(f"Installer payload executable not found: {installer_payload_exe}")
 
             # Check output
             exe_name = "english-coach-cloud.exe" if sys.platform == "win32" else "english-coach-cloud"
@@ -309,6 +342,7 @@ def main():
                 installer_path = _build_installer(releases_dir)
                 zip_path = _build_zip_bundle(releases_dir, include_runtime_activation=True)
                 print(f"\nBuild SUCCESS: {exe_path}  ({size_mb:.1f} MB)")
+                print(f"Installer payload READY: {installer_payload_dir}")
                 if installer_path:
                     print(f"Installer READY: {installer_path}")
                 print(f"Zip READY: {zip_path}")

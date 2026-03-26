@@ -6,6 +6,7 @@
 #define MyAppPublisher "English Coach"
 #define MyAppURL "https://englishcoach.app"
 #define MyAppExeName "english-coach-cloud.exe"
+#define MyAppPayloadDir "english-coach-cloud-installer"
 #define MyAppUninstallKey "{B2C3D4E5-F6A7-8901-BCDE-F12345678901}_is1"
 #define ProjectRoot "..\.."
 
@@ -53,7 +54,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "{#ProjectRoot}\releases\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ProjectRoot}\releases\{#MyAppPayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ProjectRoot}\releases\README.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProjectRoot}\releases\README_v2.0.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ProjectRoot}\releases\RELEASE_NOTES_v2.0.md"; DestDir: "{app}"; Flags: ignoreversion

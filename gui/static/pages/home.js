@@ -1,5 +1,21 @@
 // pages/home.js — Coach-first dashboard
 
+async function getWithRetry(requestFn, { attempts = 3, delayMs = 350 } = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await requestFn();
+    } catch (error) {
+      lastError = error;
+      const msg = String(error?.message || '');
+      const retryable = msg.includes('API error 500') || msg.includes('Failed to fetch');
+      if (!retryable || attempt === attempts) break;
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 export async function render(el) {
   let setupStatus = {};
   let progress = {};
@@ -8,7 +24,7 @@ export async function render(el) {
 
   try {
     const setupPromise = api.get('/api/setup/status');
-    const progressPromise = api.get('/api/progress');
+    const progressPromise = getWithRetry(() => api.get('/api/progress'));
     const coachPromise = api.get('/api/coach/status').catch(() => ({}));
     setupStatus = await setupPromise;
     if (window._currentAbortSignal?.aborted || !el.isConnected) return;
