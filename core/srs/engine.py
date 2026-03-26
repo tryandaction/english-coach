@@ -12,6 +12,9 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from core.memory.service import LearnerMemoryService
+from core.memory.store import ensure_memory_schema
+
 
 @dataclass
 class Card:
@@ -53,6 +56,7 @@ class SM2Engine:
         self._db = sqlite3.connect(str(db_path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._init_schema()
+        ensure_memory_schema(self._db)
 
     # ------------------------------------------------------------------
     # Schema
@@ -299,6 +303,10 @@ class SM2Engine:
             except sqlite3.IntegrityError:
                 pass
         self._db.commit()
+        try:
+            LearnerMemoryService(self._db).record_vocab_enrollment(user_id, word_ids)
+        except Exception:
+            pass
         return added
 
     # ------------------------------------------------------------------
@@ -430,6 +438,10 @@ class SM2Engine:
             (uuid.uuid4().hex, card_id, row["user_id"], quality, response_ms, now),
         )
         self._db.commit()
+        try:
+            LearnerMemoryService(self._db).record_vocab_review(card_id, quality, response_ms=response_ms)
+        except Exception:
+            pass
 
         return {
             "correct": correct,

@@ -13,6 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from core.memory.service import LearnerMemoryService
+from core.memory.store import ensure_memory_schema
+
 
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
 
@@ -58,6 +61,9 @@ class UserProfile:
     stem_domain: str = "physics"     # physics / engineering / cs / general
     daily_new_words: int = 20
     session_minutes: int = 30
+    preferred_style: str = "direct"
+    study_preferences: list = field(default_factory=list)
+    long_term_goal: str = ""
     total_sessions: int = 0
     total_study_minutes: int = 0
     created_at: str = ""
@@ -81,6 +87,7 @@ class UserModel:
         self._db = sqlite3.connect(str(db_path), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._init_schema()
+        ensure_memory_schema(self._db)
         # Migrate: add content_json and starred columns if not present
         for col_sql in [
             "ALTER TABLE sessions ADD COLUMN content_json TEXT DEFAULT NULL",
@@ -333,7 +340,7 @@ class UserModel:
         )
         # Update total study time on profile
         row = self._db.execute(
-            "SELECT user_id FROM sessions WHERE session_id=?", (session_id,)
+            "SELECT user_id, mode FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
         if row:
             profile = self.get_profile(row["user_id"])
@@ -342,6 +349,21 @@ class UserModel:
                 profile.total_study_minutes += duration_sec // 60
                 self._save_profile(profile)
         self._db.commit()
+        try:
+            if row:
+                memory = LearnerMemoryService(self._db, profile)
+                memory.record_session_completion(
+                    session_id=session_id,
+                    mode=row["mode"] or "",
+                    duration_sec=duration_sec,
+                    items_done=items_done,
+                    accuracy=accuracy,
+                    content_json=content_json,
+                    user_id=row["user_id"],
+                )
+                memory.refresh_daily_memory(user_id=row["user_id"])
+        except Exception:
+            pass
         try:
             from core.coach.service import CoachService
             runtime = {}

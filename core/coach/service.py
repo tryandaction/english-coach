@@ -8,6 +8,12 @@ import uuid
 from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 
+from core.coach.context import LearnerContextBuilder
+from core.coach.heartbeat import HeartbeatAction, HeartbeatDecision, HeartbeatDecisionService, HeartbeatSignals, REVIEW_DUE_THRESHOLD
+from core.coach.policy import CoachActionDecision, CoachPolicyService
+from core.memory.service import LearnerMemoryService
+from core.review.service import ReviewPoolService
+
 DEFAULT_PREFERRED_STUDY_TIME = "20:00"
 DEFAULT_QUIET_HOURS = {"start": "22:30", "end": "08:00"}
 VALID_REMINDER_LEVELS = {"off", "basic", "coach"}
@@ -155,6 +161,11 @@ class CoachService:
         self.profile = profile
         self.runtime = runtime or {}
         self._db = user_model._db
+        self.memory = LearnerMemoryService(self._db, profile)
+        self.review = ReviewPoolService(self._db, profile)
+        self.heartbeat = HeartbeatDecisionService()
+        self.context_builder = LearnerContextBuilder(self._db, profile, ai_ready=bool(self.runtime.get("ai_ready")))
+        self.policy = CoachPolicyService()
 
     def tier(self) -> str:
         if self.runtime.get("cloud_ai_ready"):
@@ -316,6 +327,66 @@ class CoachService:
             return datetime.fromisoformat(row["ts"])
         except ValueError:
             return None
+
+    def _last_prompt_at(self) -> Optional[datetime]:
+        row = self._db.execute(
+            """
+            SELECT COALESCE(fired_at, scheduled_for) AS ts
+            FROM coach_notification_log
+            WHERE user_id=? AND event_type != 'test' AND state IN ('sent', 'dismissed')
+            ORDER BY COALESCE(fired_at, scheduled_for) DESC
+            LIMIT 1
+            """,
+            (self.profile.user_id,),
+        ).fetchone()
+        if not row or not row["ts"]:
+            return None
+        try:
+            return datetime.fromisoformat(row["ts"])
+        except ValueError:
+            return None
+
+    def heartbeat_decision(
+        self,
+        plan: Optional[dict[str, Any]] = None,
+        settings: Optional[dict[str, Any]] = None,
+        now: Optional[datetime] = None,
+    ) -> HeartbeatDecision:
+        if not self.profile:
+            return HeartbeatDecision(action=HeartbeatAction.SILENT, reason="当前没有有效 profile。")
+        now = now or datetime.now()
+        plan = plan or self.sync_daily_plan(now.date())
+        settings = settings or self.get_settings()
+        memory_summary = self.memory.memory_summary(user_id=self.profile.user_id)
+        quiet_hours = settings.get("quiet_hours") or dict(DEFAULT_QUIET_HOURS)
+        review_due_count = max(
+            int(plan.get("summary", {}).get("due_now", 0) or 0),
+            int(memory_summary.get("review_due_count", 0) or 0),
+        )
+        signals = HeartbeatSignals(
+            now=now,
+            quiet_now=_is_quiet_hours(now, quiet_hours),
+            last_interaction_at=self._last_session_at(),
+            last_prompt_at=self._last_prompt_at(),
+            today_sessions=int(plan.get("summary", {}).get("today_sessions", 0) or 0),
+            plan_status=str(plan.get("status", "planned") or "planned"),
+            tasks_done=int(plan.get("summary", {}).get("tasks_done", 0) or 0),
+            review_due_count=review_due_count,
+            frequent_forgetting_count=int(memory_summary.get("frequent_forgetting_count", 0) or 0),
+        )
+        return self.heartbeat.decide(signals)
+
+    def next_action(self, plan: Optional[dict[str, Any]] = None) -> CoachActionDecision:
+        if not self.profile:
+            return CoachActionDecision(
+                action="stay_silent",
+                skill="",
+                reason="当前没有有效 profile。",
+                title="先完成 Setup",
+                route_page="setup",
+            )
+        snapshot = self.context_builder.build(plan_status=(plan.get("status") if plan else None))
+        return self.policy.decide(snapshot)
 
     def _mode_totals(self) -> dict[str, int]:
         rows = self._db.execute(
@@ -815,7 +886,7 @@ class CoachService:
         specs: list[tuple[str, str, datetime]] = []
         if today_sessions == 0:
             specs.append(("daily_plan", "plan", preferred_dt))
-        if due_now >= 10:
+        if due_now >= REVIEW_DUE_THRESHOLD:
             specs.append(("review_due", "vocab_review", preferred_dt + timedelta(minutes=45)))
         if settings["reminder_level"] == "coach":
             if today_sessions == 0:
@@ -860,7 +931,7 @@ class CoachService:
             if row["event_type"] == "daily_plan" and int(summary.get("today_sessions", 0) or 0) > 0:
                 self._db.execute("UPDATE coach_notification_log SET state='expired' WHERE event_id=?", (row["event_id"],))
                 continue
-            if row["event_type"] == "review_due" and int(summary.get("due_now", 0) or 0) < 10:
+            if row["event_type"] == "review_due" and int(summary.get("due_now", 0) or 0) < REVIEW_DUE_THRESHOLD:
                 self._db.execute("UPDATE coach_notification_log SET state='expired' WHERE event_id=?", (row["event_id"],))
                 continue
             if row["event_type"] == "streak_risk" and int(summary.get("today_sessions", 0) or 0) > 0:
@@ -939,6 +1010,9 @@ class CoachService:
 
     def coach_summary(self, plan: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         plan = plan or self.sync_daily_plan()
+        memory_summary = self.memory.memory_summary(user_id=self.profile.user_id)
+        heartbeat = self.heartbeat_decision(plan=plan)
+        next_action = self.next_action(plan=plan)
         rows = self._db.execute(
             "SELECT summary_json FROM coach_daily_plan WHERE user_id=? ORDER BY plan_date DESC LIMIT 7",
             (self.profile.user_id,),
@@ -956,13 +1030,25 @@ class CoachService:
         return {
             "plan_completion_rate_7d": round(sum(completion_rates) / max(len(completion_rates), 1)) if completion_rates else 0,
             "study_consistency_7d": round(consistency * 100 / max(len(rows), 1)) if rows else 0,
-            "review_due_today": int(plan.get("summary", {}).get("due_now", 0) or 0),
+            "review_due_today": max(
+                int(plan.get("summary", {}).get("due_now", 0) or 0),
+                int(memory_summary.get("review_due_count", 0) or 0),
+            ),
             "review_due_trend": due_trend,
+            "frequent_forgetting_count": int(memory_summary.get("frequent_forgetting_count", 0) or 0),
+            "known_words": int(memory_summary.get("known_words", 0) or 0),
+            "unsure_words": int(memory_summary.get("unsure_words", 0) or 0),
+            "unknown_words": int(memory_summary.get("unknown_words", 0) or 0),
+            "memory_last_event_at": memory_summary.get("last_event_at", ""),
             "weak_area_progress": {"current": list(self.profile.weak_areas or []), "today_focused": weak_done},
             "today_result_card": plan.get("summary", {}).get("result_card", ""),
             "today_improved_point": plan.get("summary", {}).get("improved_point", ""),
             "tomorrow_reason": plan.get("summary", {}).get("tomorrow_reason", ""),
             "plan_stage": plan.get("stage", "growth"),
+            "heartbeat_action": heartbeat.action.value,
+            "heartbeat_reason": heartbeat.reason,
+            "next_action": next_action.action,
+            "next_action_reason": next_action.reason,
             "tier": self.tier(),
         }
 
@@ -980,6 +1066,8 @@ class CoachService:
             "stage": plan.get("stage", "growth"),
             "settings": self.get_settings(),
             "plan": plan,
+            "heartbeat": self.heartbeat_decision(plan=plan).as_dict(),
+            "next_action": self.next_action(plan=plan).as_dict(),
             "coach_summary": self.coach_summary(plan),
             "recent_notifications": self.recent_notifications(),
             "next_notification": self.next_notification(),

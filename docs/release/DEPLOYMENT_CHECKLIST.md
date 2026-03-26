@@ -2,7 +2,7 @@
 
 ## Shared Baseline
 
-- [ ] `python -m unittest tests.test_license_security tests.test_quality_contract tests.test_coach_contract tests.test_gui_smoke`
+- [ ] `python -m unittest tests.test_license_security tests.test_quality_contract tests.test_chat_contract tests.test_review_contract tests.test_memory_contract tests.test_coach_contract tests.test_gui_smoke`
 - [ ] `python -m compileall ai core gui utils cli modes commercial release_tooling build_cloud.py build_opensource.py scripts tests`
 - [ ] `node --check gui/static/app.js`
 - [ ] `node --check gui/static/pages/*.js`
@@ -48,6 +48,7 @@
 
 - [ ] Home / Progress / History / Mock Exam 结果感一致
 - [ ] Reading / Listening 重点离线题型命中正常
+- [ ] `/api/memory/status` 与 `/api/practice/recommendation` 返回正常
 - [ ] Open Source 版不要求在线激活
 - [ ] Cloud 版可走 License 激活链
 - [ ] 文档与实际发布物名称一致

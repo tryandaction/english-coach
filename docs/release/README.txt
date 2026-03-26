@@ -12,6 +12,8 @@ What you can test without any API key
 - Listening built-in flow with question-type aware routing
 - Home / Progress / History
 - Daily coach plan and local reminder flow
+- Long-term learner memory and review continuity
+- Practice recommendation and chat memory context
 
 Release smoke
 -------------
@@ -21,6 +23,8 @@ Release smoke
 - Portable exe startup is covered by the release smoke script
 - Setup installer startup is also covered
 - First launch Setup, offline Reading, offline Listening, and result writeback are all verified
+- Memory continuity after restart should also be checked
+- Chat explicit-memory and recommendation APIs should also be checked
 - Run `python scripts/smoke_test_release.py --keep-temp` before publishing a new release
 
 What needs AI access
@@ -48,3 +52,4 @@ Important limits
 2. Mock Exam is still a section-flow experience, not a unified scoring system.
 3. Writing and Speaking quality feedback still depend on AI.
 4. Content quality is improving, but should not be presented as final or exhaustive.
+5. Memory continuity exists, but a dedicated memory management page is not yet included.

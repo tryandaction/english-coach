@@ -47,7 +47,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "english-coach"}
 
     # Lazy import API routers to speed up startup
-    from gui.api import vocab, wordbooks as wordbooks_api, grammar, reading, writing, chat, progress, setup as setup_api, history as history_api, voice as voice_api, listening as listening_api, warehouse as warehouse_api, speaking as speaking_api, practice as practice_api, mock_exam as mock_exam_api, coach as coach_api
+    from gui.api import vocab, wordbooks as wordbooks_api, grammar, reading, writing, chat, progress, setup as setup_api, history as history_api, voice as voice_api, listening as listening_api, warehouse as warehouse_api, speaking as speaking_api, practice as practice_api, mock_exam as mock_exam_api, coach as coach_api, memory as memory_api
     from gui.version import is_cloud
 
     app.include_router(vocab.router)
@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(speaking_api.router)
     app.include_router(chat.router)
     app.include_router(progress.router)
+    app.include_router(memory_api.router)
     app.include_router(setup_api.router)
     app.include_router(practice_api.router)
     app.include_router(mock_exam_api.router)

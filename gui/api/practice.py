@@ -7,6 +7,7 @@ reading, listening, speaking, and writing with consistent filtering.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import time
 import uuid
 from typing import Optional
@@ -14,6 +15,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from core.coach.service import CoachService
+from core.review.models import ReviewPoolSummary
+from core.review.service import ReviewPoolService
 from gui.deps import get_components
 
 router = APIRouter(prefix="/api/practice", tags=["practice"])
@@ -74,6 +78,26 @@ _PRACTICE_CATALOG = {
         ],
     },
 }
+
+
+def _empty_recommendation() -> dict:
+    return {
+        "has_profile": False,
+        "next_action": {
+            "action": "stay_silent",
+            "skill": "",
+            "reason": "",
+            "title": "",
+            "practice_mode": "single",
+            "question_types": [],
+            "subject": "",
+            "time_limit": 0,
+            "route_page": "",
+            "priority": 0,
+        },
+        "practice_request": None,
+        "review_pool": asdict(ReviewPoolSummary()),
+    }
 
 
 def _row_value(row, key: str, default=None):
@@ -373,6 +397,38 @@ def _start_writing_practice(req, kb, srs, user_model, ai, profile):
 
 def _start_vocab_practice(req, kb, srs, user_model, ai, profile):
     """Start vocabulary practice session."""
+    if req.practice_mode in {"targeted", "error_review"}:
+        review_pool = ReviewPoolService(user_model._db, profile)
+        candidates = review_pool.recommended_batch(profile.user_id, size=10)
+        summary = review_pool.summary(profile.user_id)
+        if candidates:
+            return {
+                "session_id": uuid.uuid4().hex[:12],
+                "skill": "vocab",
+                "exam": req.exam,
+                "difficulty_score": req.difficulty,
+                "subject": req.subject,
+                "practice_mode": req.practice_mode,
+                "word_count": len(candidates),
+                "review_due_total": summary.due_total,
+                "frequent_forgetting_total": summary.forgetting_total,
+                "source": "review_pool",
+                "words": [
+                    {
+                        "word_id": item.word_id,
+                        "word": item.word,
+                        "status": item.status,
+                        "due_for_review": item.due_for_review,
+                        "wrong_count": item.wrong_count,
+                        "success_count": item.success_count,
+                        "tags": item.tags,
+                        "priority_score": item.priority_score,
+                        "priority_reason": item.priority_reason,
+                    }
+                    for item in candidates
+                ],
+            }
+
     # Get words based on filters
     words = srs.get_new_words(
         user_id=profile.user_id,
@@ -576,3 +632,35 @@ def _generate_recommendations(weak_skills: list, error_rate: float) -> list[str]
         recommendations.append("Continue with current practice routine")
 
     return recommendations
+
+
+def _decision_to_practice_request(decision: dict, profile) -> Optional[dict]:
+    action = str(decision.get("action", "") or "")
+    if action == "stay_silent":
+        return None
+    req = {
+        "exam": str(getattr(profile, "target_exam", "general") or "general").lower(),
+        "skill": decision.get("skill", ""),
+        "difficulty": None,
+        "question_types": decision.get("question_types", []) or [],
+        "subject": decision.get("subject", "") or None,
+        "practice_mode": decision.get("practice_mode", "single"),
+        "time_limit": decision.get("time_limit") or None,
+    }
+    return req
+
+
+@router.get("/recommendation")
+def get_practice_recommendation():
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        return _empty_recommendation()
+    coach = CoachService(user_model, profile, {"ai_ready": ai is not None})
+    next_action = coach.next_action().as_dict()
+    review_pool = asdict(ReviewPoolService(user_model._db, profile).summary(profile.user_id))
+    return {
+        "has_profile": True,
+        "next_action": next_action,
+        "practice_request": _decision_to_practice_request(next_action, profile),
+        "review_pool": review_pool,
+    }

@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter
 from core.srs.engine import SM2Engine
 from core.coach.service import CoachService
+from core.memory.service import LearnerMemoryService
 from gui.coach_runtime import build_coach_runtime
 from gui.deps import _CONFIG_PATH, get_user_components, load_config
 
@@ -57,6 +58,7 @@ def _empty_progress(ai_ready: bool) -> dict:
         "learning_days": 0,
         "target_exam_date": "",
         "coach_summary": {},
+        "memory_summary": {},
     }
 
 
@@ -77,6 +79,7 @@ def get_progress():
 
     coach_service = CoachService(user_model, profile, runtime)
     coach_summary = coach_service.coach_summary()
+    memory_summary = LearnerMemoryService(user_model._db, profile).memory_summary()
 
     summary = user_model.progress_summary(profile.user_id)
     deck = {"total": 0, "due_today": 0, "mature": 0}
@@ -177,4 +180,5 @@ def get_progress():
         "learning_days": int(learning_days or 0),
         "target_exam_date": getattr(profile, "target_exam_date", "") or "",
         "coach_summary": coach_summary,
+        "memory_summary": memory_summary,
     }

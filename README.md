@@ -7,7 +7,7 @@
 - 能稳定跑通本地学习闭环的桌面产品
 - 有词汇 / 阅读 / 听力 / 语法 / 写作 / 口语 / Mock Exam 主路径
 - 支持用户自带 API key 的 AI 反馈能力
-- 已经开始具备“每日计划、提醒、复盘、留存”的 coach 能力
+- 已经具备“长期记忆、提醒、复盘、留存”的 coach 底座
 
 源码默认运行模式是 `opensource`。Cloud 激活后端、卖家运维脚本、真实密钥与发布运维材料不属于这个公开仓库。
 
@@ -27,7 +27,11 @@
 - TOEFL / IELTS 重点题型的离线优先命中
 - Writing / Speaking / Chat 的自带 key AI 路径
 - Practice / Mock Exam / Progress / History 的完整主界面
-- Daily coach plan / reminder / recap 的第一版骨架
+- Daily coach plan / reminder / recap 的持续教练骨架
+- 长期 learner profile、学习事件、daily memory snapshot
+- 结构化词汇记忆状态：`known / unsure / unknown`
+- review due / frequent forgetting 统计与 heartbeat 决策
+- 本地 `memory` API 与 `progress` / `coach` 摘要接口
 
 ## 本地运行
 
@@ -104,6 +108,9 @@ Open Source 版本默认不附带任何商业激活配置。
 - 首页会生成“今天该做什么”
 - 计划优先级固定：到期复习 → 弱项修复 → 考试目标任务 → 冲刺任务
 - 首页 coach 任务可直接进入真实训练页
+- learner profile 会持续保存目标考试、长期目标、学习偏好
+- 词汇记忆会跨重启保存 review due、掌握状态与高错词信息
+- Heartbeat 会在安静时段、最近已提醒、到期复习较多等条件下做本地决策
 - Progress 会显示计划完成率、稳定度、复习债务趋势
 - History 会按天复盘，而不只是 session 列表
 - 四类任务完成后会写回简短结果 recap，供 Home / Progress / History 复用
@@ -121,6 +128,32 @@ Open Source 版本默认不附带任何商业激活配置。
 - 支持 Bark / Webhook 扩展入口
 - 默认不做高频骚扰
 
+## Memory 与接口
+
+当前产品除了 GUI 主路径，还新增了本地长期记忆接口：
+
+- `/api/coach/status`
+  - 返回 plan、heartbeat、coach summary
+- `/api/progress`
+  - 返回 progress summary 与 memory summary
+- `/api/memory/status`
+  - 返回长期记忆摘要、facts、review due、高错词
+- `/api/memory/facts`
+  - 支持读取和写入结构化 learner facts
+- `/api/practice/recommendation`
+  - 返回当前最值得执行的 next action 与可直接复用的 practice request
+- `/api/chat/context/{session_id}`
+  - 返回当前 chat 会话使用的 learner context
+- `/api/chat/remember/{session_id}`
+  - 显式写入长期记忆 fact
+- `/api/chat/word-status/{session_id}`
+  - 显式标记词汇 `known / unsure / unknown`
+
+长期记忆实现与边界说明见：
+
+- `docs/coach-memory-heartbeat-plan.md`
+- `docs/coach-review-policy-architecture.md`
+
 ## 数据目录
 
 默认用户数据目录由运行模式决定：
@@ -133,6 +166,7 @@ Open Source 版本默认不附带任何商业激活配置。
 - `user.db`
 - `teaching.db`
 - 学习历史
+- 长期 learner memory / heartbeat / review 状态
 - 自建词书
 - 本地配置
 - `license.key`（若存在 cloud 版本本地记录）
@@ -144,7 +178,7 @@ Open Source 版本默认不附带任何商业激活配置。
 当前自动验证基线：
 
 - `python -m compileall ai core gui utils cli modes commercial release_tooling build_cloud.py build_opensource.py scripts tests`
-- `python -m unittest tests.test_license_security tests.test_quality_contract tests.test_coach_contract tests.test_gui_smoke`
+- `python -m unittest tests.test_license_security tests.test_quality_contract tests.test_chat_contract tests.test_review_contract tests.test_memory_contract tests.test_coach_contract tests.test_gui_smoke`
 - `node --check gui/static/app.js`
 - `node --check gui/static/pages/*.js`
 

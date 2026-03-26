@@ -54,6 +54,8 @@ _SANITIZED_ENV_KEYS = [
     "EC_LICENSE_ADMIN_TOKEN",
 ]
 
+_SMOKE_PATH_MARKER = "english_coach_release_smoke_"
+
 
 def _worker_headers(token: str) -> dict[str, str]:
     return {
@@ -261,7 +263,6 @@ def restore_uninstall_registry(snapshots: list[tuple[int, str, dict[str, tuple[o
 
 
 def cleanup_stale_smoke_uninstall_entries() -> None:
-    stale_marker = "english_coach_release_smoke_"
     hives = [
         (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
         (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
@@ -285,7 +286,7 @@ def cleanup_stale_smoke_uninstall_entries() -> None:
                             install_location = str(winreg.QueryValueEx(item, "InstallLocation")[0]) if _has_reg_value(item, "InstallLocation") else ""
                             uninstall_string = str(winreg.QueryValueEx(item, "UninstallString")[0]) if _has_reg_value(item, "UninstallString") else ""
                         lowered = f"{install_location}\n{uninstall_string}".lower()
-                        if display_name.startswith("English Coach") and stale_marker in lowered:
+                        if display_name.startswith("English Coach") and _SMOKE_PATH_MARKER in lowered:
                             winreg.DeleteKey(root, name)
                     except FileNotFoundError:
                         continue
@@ -301,6 +302,119 @@ def _has_reg_value(key, value_name: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def _query_registry_string(hive, subkey: str, value_name: str) -> str:
+    try:
+        with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ) as key:
+            return str(winreg.QueryValueEx(key, value_name)[0])
+    except OSError:
+        return ""
+
+
+def _mode_shortcut_paths(mode: str) -> list[Path]:
+    appdata = Path(os.environ["APPDATA"])
+    userprofile = Path(os.environ["USERPROFILE"])
+    if mode == "cloud":
+        return [
+            appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "English Coach Cloud",
+            userprofile / "Desktop" / "English Coach.lnk",
+        ]
+    if mode == "opensource":
+        return [
+            appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "English Coach Open Source",
+            userprofile / "Desktop" / "English Coach.lnk",
+        ]
+    return []
+
+
+def _copy_path(src: Path, dst: Path) -> None:
+    if src.is_dir():
+        shutil.copytree(src, dst)
+    else:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def _remove_path(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def preserve_existing_install(mode: str, temp_root: Path) -> dict[str, Any] | None:
+    for hive, subkey in _UNINSTALL_REGISTRY_SUBKEYS.get(mode, []):
+        install_location = _query_registry_string(hive, subkey, "InstallLocation").strip()
+        if not install_location:
+            continue
+        lowered = install_location.lower()
+        if _SMOKE_PATH_MARKER in lowered:
+            continue
+        install_dir = Path(install_location)
+        if not install_dir.exists():
+            continue
+
+        backup_root = temp_root / f"preserved-{mode}-install"
+        install_backup = backup_root / "install"
+        shortcuts: list[dict[str, str]] = []
+        _copy_path(install_dir, install_backup)
+        for src in _mode_shortcut_paths(mode):
+            if not src.exists():
+                continue
+            dst = backup_root / "shortcuts" / src.name
+            _copy_path(src, dst)
+            shortcuts.append({"source": str(src), "backup": str(dst)})
+        return {
+            "mode": mode,
+            "install_dir": str(install_dir),
+            "install_backup": str(install_backup),
+            "shortcuts": shortcuts,
+        }
+    return None
+
+
+def restore_existing_install(state: dict[str, Any] | None) -> None:
+    if not state:
+        return
+    install_dir = Path(state["install_dir"])
+    install_backup = Path(state["install_backup"])
+    if install_backup.exists():
+        _remove_path(install_dir)
+        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(install_backup, install_dir)
+    for item in state.get("shortcuts", []):
+        src = Path(item["source"])
+        backup = Path(item["backup"])
+        if not backup.exists():
+            continue
+        _remove_path(src)
+        _copy_path(backup, src)
+
+
+def wait_for_installed_exe(install_dir: Path, timeout_sec: int = 180) -> Path:
+    exe_candidates = [
+        install_dir / "english-coach-opensource.exe",
+        install_dir / "english-coach-cloud.exe",
+    ]
+    uninstaller = install_dir / "unins000.exe"
+    uninstall_data = install_dir / "unins000.dat"
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        exe_path = next((path for path in exe_candidates if path.exists()), None)
+        uninstall_ready = (
+            not uninstaller.exists()
+            or (uninstall_data.exists() and uninstall_data.stat().st_size > 0)
+        )
+        if exe_path is not None and uninstall_ready:
+            return exe_path
+        time.sleep(1)
+    raise TimeoutError(f"安装后未在限定时间内准备好 exe: {install_dir}")
 
 
 def launch_app(exe_path: Path, appdata_root: Path, label: str, timeout_sec: int = 90) -> tuple[subprocess.Popen[Any], dict[str, Any]]:
@@ -418,10 +532,18 @@ def verify_page_shells(base_url: str, expected_version_mode: str) -> None:
     progress = request_json_with_retry(f"{base_url}/api/progress")
     history = request_json_with_retry(f"{base_url}/api/history/daily?limit_days=7")
     practice = request_json_with_retry(f"{base_url}/api/practice/catalog")
+    recommendation = request_json_with_retry(f"{base_url}/api/practice/recommendation")
+    memory = request_json_with_retry(f"{base_url}/api/memory/status")
+    topic = request_json_with_retry(f"{base_url}/api/chat/topic")
     assert_true("plan" in coach, "coach/status 缺少 plan")
     assert_true(progress["has_profile"] is True, "progress 未识别 profile")
     assert_true("days" in history, "history/daily 返回异常")
     assert_true("exams" in practice, "practice/catalog 返回异常")
+    assert_true("next_action" in recommendation, "practice/recommendation 缺少 next_action")
+    assert_true(recommendation.get("has_profile") is True, "practice/recommendation 未识别 profile")
+    assert_true("summary" in memory, "memory/status 缺少 summary")
+    assert_true(memory.get("has_profile") is True, "memory/status 未识别 profile")
+    assert_true(bool(topic.get("topic")), "chat/topic 未返回话题")
     if expected_version_mode == "cloud":
         license_status = request_json_with_retry(f"{base_url}/api/license/status")
         assert_true("activation_available" in license_status, "cloud build 缺少 license/status")
@@ -497,6 +619,8 @@ def verify_post_practice_state(base_url: str) -> None:
     progress = request_json(f"{base_url}/api/progress")
     coach = request_json(f"{base_url}/api/coach/status")
     history = request_json(f"{base_url}/api/history/daily?limit_days=3")
+    memory = request_json(f"{base_url}/api/memory/status")
+    recommendation = request_json(f"{base_url}/api/practice/recommendation")
     assert_true(progress["today_summary"]["sessions"] >= 2, f"today_summary.sessions 异常: {progress['today_summary']}")
     assert_true(bool(history["days"]), "history/daily 应至少有一天记录")
     first_day = history["days"][0]
@@ -507,6 +631,9 @@ def verify_post_practice_state(base_url: str) -> None:
     assert_true(bool(coach["plan"]["summary"]["result_card"]), "coach result_card 为空")
     assert_true(bool(coach["plan"]["summary"].get("improved_point")), "coach improved_point 为空")
     assert_true(bool(coach["plan"]["summary"]["tomorrow_reason"]), "coach tomorrow_reason 为空")
+    assert_true("next_action" in coach, "coach/status 缺少 next_action")
+    assert_true("summary" in memory and memory["summary"]["review_due_count"] >= 0, "memory/status summary 异常")
+    assert_true("next_action" in recommendation, "practice/recommendation 缺少 next_action")
 
 
 def run_flow(exe_path: Path, appdata_root: Path, label: str, expected_version_mode: str) -> None:
@@ -548,12 +675,7 @@ def run_installer(installer_path: Path, install_dir: Path) -> Path:
         check=True,
         cwd=str(installer_path.parent),
     )
-    exe_candidates = [
-        install_dir / "english-coach-opensource.exe",
-        install_dir / "english-coach-cloud.exe",
-    ]
-    exe_path = next((path for path in exe_candidates if path.exists()), None)
-    assert_true(exe_path is not None, f"安装后未找到 exe: {install_dir}")
+    exe_path = wait_for_installed_exe(install_dir)
     assert_true(exe_path.exists(), f"安装后未找到 exe: {exe_path}")
     return exe_path
 
@@ -591,6 +713,7 @@ def main() -> int:
             ignore_cleanup_errors=True,
         )
         temp_root = Path(temp_root_obj.name)
+    preserved_install = preserve_existing_install(args.expected_version_mode, temp_root)
     uninstall_snapshots = backup_uninstall_registry(args.expected_version_mode)
     try:
         run_flow(portable_exe, temp_root / "portable-appdata", "portable exe", args.expected_version_mode)
@@ -605,6 +728,7 @@ def main() -> int:
     finally:
         cleanup_stale_smoke_uninstall_entries()
         restore_uninstall_registry(uninstall_snapshots)
+        restore_existing_install(preserved_install)
         if temp_root_obj is not None:
             temp_root_obj.cleanup()
         else:

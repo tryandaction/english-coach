@@ -13,6 +13,10 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from core.coach.service import CoachService
+from core.memory.service import LearnerMemoryService
+from core.review.service import ReviewPoolService
+from core.vocab.catalog import normalize_word
 from gui.deps import _CONFIG_PATH, get_components, load_config
 from modes.chat import _TOPIC_STARTERS, EXAM_MODES
 
@@ -24,12 +28,79 @@ class ChatSession:
     session_id: str
     user_id: str
     db_session_id: str
+    exam: str
     history: list = field(default_factory=list)
     turns: int = 0
     ai_override: Any = None
 
 
 _sessions: dict[str, ChatSession] = {}
+
+
+class RememberRequest(BaseModel):
+    fact_type: str
+    fact_key: str
+    value: Any
+    source: str = "chat"
+    confidence: float = 1.0
+
+
+class WordStatusRequest(BaseModel):
+    word: str
+    status: str
+    definition_en: str = ""
+    definition_zh: str = ""
+    topic: str = "general"
+    difficulty: str = "B1"
+    tags: list[str] = []
+
+
+def _memory_prompt(profile, user_model) -> str:
+    memory = LearnerMemoryService(user_model._db, profile)
+    review = ReviewPoolService(user_model._db, profile)
+    facts = memory.facts(limit=6)
+    summary = memory.memory_summary()
+    review_batch = review.recommended_batch(profile.user_id, size=3)
+    lines = [
+        "You are the learner's long-term private English coach.",
+        f"Target exam: {getattr(profile, 'target_exam', 'general') or 'general'}",
+        f"CEFR: {getattr(profile, 'cefr_level', 'B1') or 'B1'}",
+        f"Preferred style: {getattr(profile, 'preferred_style', 'direct') or 'direct'}",
+    ]
+    long_term_goal = str(getattr(profile, "long_term_goal", "") or "").strip()
+    if long_term_goal:
+        lines.append(f"Long-term goal: {long_term_goal}")
+    prefs = list(getattr(profile, "study_preferences", []) or [])
+    if prefs:
+        lines.append("Study preferences: " + ", ".join(str(item) for item in prefs[:5]))
+    if getattr(profile, "weak_areas", None):
+        lines.append("Weak areas: " + ", ".join(list(profile.weak_areas)[:5]))
+    if facts:
+        compact = []
+        for fact in facts[:5]:
+            compact.append(f"{fact.fact_type}:{fact.fact_key}={fact.value}")
+        lines.append("Known learner facts: " + " | ".join(compact))
+    if int(summary.get("review_due_count", 0) or 0) > 0:
+        lines.append(f"Review due count: {int(summary.get('review_due_count', 0) or 0)}")
+    if int(summary.get("frequent_forgetting_count", 0) or 0) > 0:
+        lines.append(f"Frequent forgetting count: {int(summary.get('frequent_forgetting_count', 0) or 0)}")
+    if review_batch:
+        lines.append("Words that likely need attention: " + ", ".join(item.word for item in review_batch))
+    lines.append("Use this context to keep continuity, avoid overly easy repetition, and prefer one small useful next step.")
+    lines.append("Do not dump internal memory metadata unless it helps the learner directly.")
+    return "\n".join(lines)
+
+
+def _session_memory_summary(profile, user_model) -> dict:
+    memory = LearnerMemoryService(user_model._db, profile)
+    summary = memory.memory_summary()
+    coach = CoachService(user_model, profile, {"ai_ready": True})
+    return {
+        "facts_count": int(summary.get("facts_count", 0) or 0),
+        "review_due_count": int(summary.get("review_due_count", 0) or 0),
+        "frequent_forgetting_count": int(summary.get("frequent_forgetting_count", 0) or 0),
+        "next_action": coach.next_action().as_dict(),
+    }
 
 
 @router.post("/start")
@@ -47,7 +118,7 @@ def start_chat(exam: Optional[str] = None, topic: Optional[str] = None):
 
     sid = uuid.uuid4().hex[:12]
     db_sid = user_model.start_session(profile.user_id, "chat")
-    sess = ChatSession(session_id=sid, user_id=profile.user_id, db_session_id=db_sid)
+    sess = ChatSession(session_id=sid, user_id=profile.user_id, db_session_id=db_sid, exam=target)
     sess.history.append({"role": "assistant", "content": opener})
     _sessions[sid] = sess
 
@@ -60,6 +131,7 @@ def start_chat(exam: Optional[str] = None, topic: Optional[str] = None):
         "mode_name": mode["name"],
         "mode_description": mode["description"],
         "mode_tips": mode["tips"],
+        "memory_summary": _session_memory_summary(profile, user_model),
     }
 
 
@@ -80,8 +152,9 @@ def send_message(session_id: str, req: MessageRequest):
 
     def generate():
         try:
+            memory_context = {"role": "system", "content": _memory_prompt(profile, user_model)}
             full_response = client.chat(
-                messages=sess.history,
+                messages=[memory_context] + sess.history,
                 cefr_level=profile.cefr_level,
             )
             sess.history.append({"role": "assistant", "content": full_response})
@@ -102,6 +175,106 @@ def end_chat(session_id: str):
     content = json.dumps(sess.history, ensure_ascii=False)
     user_model.end_session(sess.db_session_id, 0, sess.turns, 1.0, content_json=content)
     return {"ok": True, "turns": sess.turns}
+
+
+@router.get("/context/{session_id}")
+def get_chat_context(session_id: str):
+    sess = _sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "Session not found")
+    kb, srs, user_model, ai, profile = get_components()
+    memory = LearnerMemoryService(user_model._db, profile)
+    review = ReviewPoolService(user_model._db, profile)
+    return {
+        "session_id": session_id,
+        "prompt_context": _memory_prompt(profile, user_model),
+        "memory_summary": memory.memory_summary(),
+        "facts": [
+            {
+                "fact_type": item.fact_type,
+                "fact_key": item.fact_key,
+                "value": item.value,
+                "source": item.source,
+            }
+            for item in memory.facts(limit=10)
+        ],
+        "review_words": [item.word for item in review.recommended_batch(profile.user_id, size=5)],
+    }
+
+
+@router.post("/remember/{session_id}")
+def remember_from_chat(session_id: str, req: RememberRequest):
+    sess = _sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "Session not found")
+    kb, srs, user_model, ai, profile = get_components()
+    memory = LearnerMemoryService(user_model._db, profile)
+    fact = memory.remember_fact(
+        req.fact_type,
+        req.fact_key,
+        req.value,
+        source=req.source or "chat",
+        confidence=req.confidence,
+    )
+    return {
+        "ok": True,
+        "fact": {
+            "fact_type": fact.fact_type,
+            "fact_key": fact.fact_key,
+            "value": fact.value,
+            "source": fact.source,
+            "confidence": fact.confidence,
+        },
+        "memory_summary": memory.memory_summary(),
+    }
+
+
+@router.post("/word-status/{session_id}")
+def update_word_status_from_chat(session_id: str, req: WordStatusRequest):
+    sess = _sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "Session not found")
+    kb, srs, user_model, ai, profile = get_components()
+    word = normalize_word(req.word)
+    if not word:
+        raise HTTPException(400, "Word is required")
+    row = srs._db.execute("SELECT word_id FROM vocabulary WHERE word=?", (word,)).fetchone()
+    if row:
+        word_id = row["word_id"]
+    else:
+        word_id = srs.add_word(
+            word,
+            req.definition_en or "",
+            req.definition_zh or "",
+            topic=req.topic or "general",
+            difficulty=req.difficulty or profile.cefr_level or "B1",
+            source="chat",
+            exam_type=profile.target_exam or "general",
+            subject_domain="general",
+        )
+    srs.enroll_words(profile.user_id, [word_id])
+    memory = LearnerMemoryService(user_model._db, profile)
+    due_for_review = "" if req.status == "known" else __import__("datetime").date.today().isoformat()
+    state = memory.set_vocab_status(
+        profile.user_id,
+        word_id,
+        req.status,
+        source="chat",
+        topic=req.topic or "general",
+        difficulty=req.difficulty or profile.cefr_level or "B1",
+        tags=list(req.tags or []),
+        due_for_review=due_for_review,
+    )
+    if not state:
+        raise HTTPException(500, "Failed to update vocab state")
+    return {
+        "ok": True,
+        "word": state.word,
+        "word_id": state.word_id,
+        "status": state.status,
+        "due_for_review": state.due_for_review,
+        "memory_summary": memory.memory_summary(),
+    }
 
 
 class ConfigRequest(BaseModel):

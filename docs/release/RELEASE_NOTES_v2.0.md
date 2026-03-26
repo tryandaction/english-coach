@@ -53,6 +53,23 @@
 - `python build_cloud.py` 也会一次生成 exe、setup 和 zip，减少商业版手工发布步骤
 - 商业卖家侧继续以 `python send_key.py` 作为默认入口，可直接输出买家文案
 
+### 6. 长期私人教练底座开始落地
+
+- learner profile 新增长期目标、学习风格、学习偏好等稳定字段
+- 新增结构化 learner memory、learning events、daily memory snapshot
+- 词汇状态不再只停留在 SRS 卡片，还会额外记录 `known / unsure / unknown`
+- 系统会统计 review due 和 frequent forgetting，用于后续 coach 决策
+- coach summary 新增 heartbeat action、memory summary、连续性相关信息
+- 新增本地 `/api/memory/status` 与 `/api/memory/facts`，便于 GUI 和后续集成读取长期记忆
+
+### 7. review pool / policy / chat 连续性进一步落地
+
+- 新增 `review pool` 汇总与优先级排序，词汇定向练习不再只给新词
+- 新增 `next_action` 策略输出，`CoachService` 和 `/api/practice/recommendation` 都能给出下一步动作
+- Chat 现在可以显式记住 learner facts，而不只是临时对话
+- Chat 现在可以显式标记词汇 `known / unsure / unknown`
+- Chat 回复会读取 learner context、review due 和高错词，连续性更真实
+
 ## 当前适合重点测试的内容
 
 1. 首启 Setup 是否能顺利完成
@@ -62,7 +79,9 @@
 5. Mock Reading 的篇幅、题量和加载速度是否更像正式训练
 6. 配置 API key 后，Writing / Speaking / Chat 是否正常工作
 7. 完成任意训练后，Progress / History 是否立即出现真实变化
-8. 测试提醒与 quiet hours 是否按预期工作
+8. 关闭并重新打开应用后，词汇连续性和 coach 连续性是否仍保留
+9. Chat 显式记忆写入后，下一次会话是否能延续上下文
+10. 测试提醒与 quiet hours 是否按预期工作
 
 ## 当前仍要保持克制的地方
 
@@ -70,3 +89,4 @@
 - `Mock Exam` 仍是 section-flow，不是统一统分系统
 - `Writing / Speaking` 的高质量反馈仍依赖用户自己的 API key
 - 当前内容质量和覆盖率仍会继续迭代，不应夸大为最终定版
+- 长期记忆底座已落地，但独立的 memory 可视化管理页还未做完

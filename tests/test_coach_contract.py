@@ -155,6 +155,22 @@ class CoachServiceContractTests(unittest.TestCase):
             srs._db.close()
             tmpdir.cleanup()
 
+    def test_build_status_exposes_next_action(self) -> None:
+        tmpdir, srs, user_model, profile, service = self._build_service()
+        try:
+            word_ids = [
+                srs.add_word(f"review_{idx}", "definition", source="toefl_awl", exam_type="toefl")
+                for idx in range(8)
+            ]
+            srs.enroll_words(profile.user_id, word_ids)
+            status = service.build_status()
+            self.assertIn("next_action", status)
+            self.assertEqual(status["next_action"]["action"], "review_words")
+        finally:
+            user_model._db.close()
+            srs._db.close()
+            tmpdir.cleanup()
+
     def test_listening_priority_builtin_question_types_are_available_offline(self) -> None:
         cases = [
             ("toefl", "conversation", "detail"),

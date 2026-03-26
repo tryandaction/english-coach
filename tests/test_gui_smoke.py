@@ -24,6 +24,12 @@ class GuiSmokeTests(unittest.TestCase):
             "gui.api.progress.build_coach_runtime",
             return_value={"ai_ready": False},
         ), patch(
+            "gui.api.memory.get_user_components",
+            return_value=user_components,
+        ), patch(
+            "gui.api.practice.get_components",
+            return_value=(None, None, None, None, None),
+        ), patch(
             "gui.api.coach.get_user_components",
             return_value=user_components,
         ), patch(
@@ -34,6 +40,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertEqual(client.get("/").status_code, 200)
             self.assertEqual(client.get("/health").status_code, 200)
             self.assertEqual(client.get("/api/progress").status_code, 200)
+            self.assertEqual(client.get("/api/memory/status").status_code, 200)
+            self.assertEqual(client.get("/api/practice/recommendation").status_code, 200)
             self.assertEqual(client.get("/api/coach/status").status_code, 200)
             self.assertEqual(client.get("/api/history/daily").status_code, 200)
 

@@ -10,6 +10,7 @@
 | Vocabulary / Word Books / SRS | 支持 | 支持 |
 | Grammar / Reading / Listening | 支持 | 支持 |
 | Practice / Progress / History | 支持 | 支持 |
+| 长期 learner memory / heartbeat 底座 | 支持 | 支持 |
 | Mock Exam section flow | 支持 | 支持 |
 | Chat / Writing / Speaking AI 功能 | 需要用户自带 API key | 可走 License 激活内置 AI，或改用自带 API key |
 | Cloud 激活服务 | 不随开源包发放 | 正式 cloud 包默认读取本地激活配置，安装后可直接走 License 激活 |
@@ -22,6 +23,7 @@
 - 首启 Setup
 - 无 AI 时的降级体验
 - 离线学习主路径
+- 长期记忆、复习连续性、heartbeat 提示是否稳定
 - Open Source 下配置自带 API key 的 AI 能力
 - Cloud 下 License / 自带 API key / 离线三种入口是否清晰
 - 首页、进度页、结果页的闭环体验
