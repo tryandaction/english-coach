@@ -17,7 +17,7 @@ Recommended test order
 6. Add your own API key if you want to test Chat / Writing / Speaking
 7. If this is a Cloud build with activation settings, test License activation too
 8. Restart once and confirm coach continuity and review counts still remain
-9. In Chat, try explicit learner-memory actions and verify the next session still sees them
+9. In Chat, try explicit or auto learner-memory actions and verify the next session still sees them
 
 Recommended release check
 -------------------------
@@ -40,11 +40,14 @@ This verifies:
 
 - portable exe startup
 - setup installer startup
+- single-instance protection for repeated launch
 - first-run Setup
 - offline Reading / Listening completion
 - Home / Progress / History writeback after real sessions
 - memory and review continuity after restart
 - chat memory context and practice recommendation endpoints
+- Start Menu shortcut target after install
+- Desktop shortcut target after install
 - clean smoke exit without leftover `english-coach-opensource` processes
 
 Notes
@@ -56,3 +59,5 @@ Notes
 - Coach tasks can jump directly into real training pages.
 - Long-term learner memory now includes profile continuity, vocab state, and heartbeat signals.
 - With AI configured, Chat can now read learner context and explicitly write learner facts / word states.
+- User word books now support visible post-add editing directly from each word row via an `Edit` action.
+- Installer upgrades now use a single replace-old-version choice instead of repeated confirmation popups.

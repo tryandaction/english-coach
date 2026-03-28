@@ -1351,6 +1351,7 @@ function renderWordList(content, book, filter, words) {
                 </div>
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                ${book.is_builtin ? '' : `<button class="btn btn-outline btn-word-edit-quick" data-word-id="${w.word_id}" style="font-size:11px;padding:4px 10px">✏️ Edit</button>`}
                 <button class="tts-btn" onclick="event.stopPropagation();tts('${w.word.replace(/'/g,"\\'")}')">🔊</button>
                 <span title="${dot.label}" style="width:10px;height:10px;border-radius:50%;background:${dot.color};display:inline-block;flex-shrink:0"></span>
                 <span class="expand-arrow" style="font-size:10px;color:var(--text-dim)">▶</span>
@@ -1407,7 +1408,7 @@ function renderWordList(content, book, filter, words) {
 
     container.querySelectorAll('.word-row-header').forEach(header => {
       header.addEventListener('click', (e) => {
-        if (e.target.closest('.bulk-cb') || e.target.closest('.tts-btn')) return;
+        if (e.target.closest('.bulk-cb') || e.target.closest('.tts-btn') || e.target.closest('.btn-word-edit-quick')) return;
         if (_bulkMode) return;
         const row = header.closest('.word-row');
         const detail = row.querySelector('.word-row-detail');
@@ -1454,6 +1455,29 @@ function renderWordList(content, book, filter, words) {
           return;
         }
         openInlineWordEditor(host, word, book, content);
+      });
+    });
+
+    container.querySelectorAll('.btn-word-edit-quick').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const wid = btn.dataset.wordId;
+        const word = _allWords.find(item => item.word_id === wid);
+        const row = btn.closest('.word-row');
+        const detail = row?.querySelector('.word-row-detail');
+        const arrow = row?.querySelector('.expand-arrow');
+        const host = detail?.querySelector(`.inline-word-editor-host[data-word-id="${wid}"]`);
+        if (!word || !detail || !host) return;
+        container.querySelectorAll('.inline-word-editor-host').forEach(otherHost => {
+          if (otherHost !== host) {
+            otherHost.innerHTML = '';
+            otherHost.style.display = 'none';
+          }
+        });
+        detail.style.display = '';
+        if (arrow) arrow.textContent = '▼';
+        openInlineWordEditor(host, word, book, content);
+        host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       });
     });
 

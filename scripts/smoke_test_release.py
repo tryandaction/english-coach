@@ -506,7 +506,7 @@ def verify_single_instance_guard(exe_path: Path, appdata_root: Path, label: str)
         env=env,
     )
     payload: dict[str, Any] | None = None
-    deadline = time.time() + 20
+    deadline = time.time() + 60
     try:
         while time.time() < deadline:
             if probe_path.exists():

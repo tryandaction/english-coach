@@ -18,6 +18,9 @@
   - [ ] `releases/english-coach-v2.0.0-opensource.zip`
 - [ ] 运行 `python scripts/smoke_test_release.py --keep-temp`
 - [ ] 确认 portable + installer 都通过
+- [ ] 确认重复启动被单实例保护拦截，不会同时弹出多个桌面窗口
+- [ ] 确认桌面快捷方式指向最新安装目录
+- [ ] 确认开始菜单快捷方式指向最新安装目录
 - [ ] 确认 smoke 结束后无 `english-coach-opensource` 残留进程
 
 ## Cloud Release
@@ -27,7 +30,7 @@
   - [ ] 兼容旧路径：`cloud_activation_config.json` 或 `releases/cloud_activation_config.json`
   - [ ] 若设置了 `EC_WORKER_URL / EC_WORKER_CLIENT_TOKEN`，两者必须同时设置
 - [ ] 运行 `python scripts/check_cloud_activation.py`
-- [ ] 确认 `register -> activate -> verify -> proxy -> inspect -> revoke` 全通过
+- [ ] 确认 `runtime-info -> register -> activate -> verify -> proxy -> inspect -> revoke` 全通过
 - [ ] 运行 `python build_cloud.py`
 - [ ] 不要与 `python build_opensource.py` 并行执行（两者共用 `build/`）
 - [ ] 确认生成：
@@ -37,6 +40,7 @@
 - [ ] 运行：
   - [ ] `python scripts/smoke_test_release.py --expected-version-mode cloud --portable-exe releases/english-coach-cloud.exe --installer-exe releases/english-coach-cloud-setup.exe --keep-temp`
 - [ ] 确认 portable + installer 都通过
+- [ ] 确认 cloud smoke 已覆盖 chat `remember / word-status / context`
 - [ ] 确认 smoke 结束后无 `english-coach-cloud` 残留进程
 - [ ] 手工安装 `releases/english-coach-cloud-setup.exe` 后确认：
   - [ ] 默认目录为 `%LOCALAPPDATA%\English Coach Cloud`
@@ -50,6 +54,7 @@
 - [ ] Reading / Listening 重点离线题型命中正常
 - [ ] `/api/memory/status` 与 `/api/practice/recommendation` 返回正常
 - [ ] Open Source 版不要求在线激活
+- [ ] Open Source 版输出目录没有残留 `cloud_activation_config.json`
 - [ ] Cloud 版可走 License 激活链
 - [ ] 文档与实际发布物名称一致
 - [ ] `gui/cloud_license_defaults.py` 仍保持源码空默认值
