@@ -620,20 +620,35 @@ p  { color: var(--text-dim); font-size: 14px; line-height: 1.6; margin-bottom: 1
 .vocab-editor-status[data-tone="info"] { color: var(--accent); }
 .vocab-editor-grid {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(300px, 0.9fr) minmax(0, 1.25fr);
+  gap: 22px;
   align-items: start;
 }
 .vocab-editor-form {
   background: rgba(255,255,255,0.02);
   border: 1px solid var(--border);
   border-radius: 16px;
-  padding: 18px;
+  padding: 22px;
 }
 .vocab-editor-field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+.vocab-editor-form .form-group {
+  margin-bottom: 20px;
+}
+.vocab-editor-form input,
+.vocab-editor-form textarea {
+  width: 100%;
+  display: block;
+}
+.vocab-editor-form textarea {
+  min-height: 110px;
+  padding: 12px 14px;
+  font-size: 15px;
+  line-height: 1.65;
+  resize: vertical;
 }
 .vocab-editor-preview-card {
   height: 100%;
