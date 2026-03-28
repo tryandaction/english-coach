@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from utils.private_paths import display_path, seller_config_candidates
+from utils.private_paths import cloud_activation_config_candidates, display_path, seller_config_candidates
 
 RELEASES = ROOT / "releases"
 DEFAULT_PORTABLE_EXE = RELEASES / "english-coach-opensource.exe"
@@ -141,11 +141,20 @@ def _load_seller_admin_credentials() -> tuple[str, str]:
     if admin_url and admin_token:
         return admin_url, admin_token
 
+    worker_url = ""
+    for candidate in cloud_activation_config_candidates():
+        if not candidate.exists():
+            continue
+        cfg = _load_json(candidate, "cloud_activation_config.json")
+        worker_url = str(cfg.get("worker_url", "") or "").strip()
+        if worker_url:
+            break
+
     for candidate in seller_config_candidates():
         if not candidate.exists():
             continue
         cfg = _load_json(candidate, "seller_cloud_config.json")
-        admin_url = str(cfg.get("admin_url", "") or "").strip()
+        admin_url = str(cfg.get("admin_url", "") or "").strip() or worker_url
         admin_token = str(cfg.get("admin_token", "") or "").strip()
         if admin_url and admin_token:
             return admin_url, admin_token
@@ -314,18 +323,54 @@ def _query_registry_string(hive, subkey: str, value_name: str) -> str:
 
 def _mode_shortcut_paths(mode: str) -> list[Path]:
     appdata = Path(os.environ["APPDATA"])
-    userprofile = Path(os.environ["USERPROFILE"])
+    desktop = Path(
+        subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "$ws = New-Object -ComObject WScript.Shell; $ws.SpecialFolders('Desktop')",
+            ],
+            text=True,
+        ).strip()
+    )
     if mode == "cloud":
         return [
             appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "English Coach Cloud",
-            userprofile / "Desktop" / "English Coach.lnk",
+            desktop / "English Coach.lnk",
         ]
     if mode == "opensource":
         return [
             appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "English Coach Open Source",
-            userprofile / "Desktop" / "English Coach.lnk",
+            desktop / "English Coach.lnk",
         ]
     return []
+
+
+def _app_shortcut_links(mode: str) -> list[Path]:
+    paths = _mode_shortcut_paths(mode)
+    if not paths:
+        return []
+    start_menu_dir = paths[0]
+    desktop_link = paths[1] if len(paths) > 1 else None
+    links = [start_menu_dir / "English Coach.lnk"]
+    if desktop_link is not None:
+        links.append(desktop_link)
+    return links
+
+
+def _read_shortcut_target(path: Path) -> Path:
+    escaped = str(path).replace("'", "''")
+    script = (
+        "$shell = New-Object -ComObject WScript.Shell; "
+        f"$shortcut = $shell.CreateShortcut('{escaped}'); "
+        "[Console]::WriteLine($shortcut.TargetPath)"
+    )
+    target = subprocess.check_output(
+        ["powershell", "-NoProfile", "-Command", script],
+        text=True,
+    ).strip()
+    return Path(target)
 
 
 def _copy_path(src: Path, dst: Path) -> None:
@@ -443,6 +488,53 @@ def launch_app(exe_path: Path, appdata_root: Path, label: str, timeout_sec: int 
         raise
 
 
+def verify_single_instance_guard(exe_path: Path, appdata_root: Path, label: str) -> None:
+    log(f"验证 {label} 单实例保护")
+    probe_path = appdata_root / "duplicate-ready.json"
+    if probe_path.exists():
+        probe_path.unlink()
+    env = os.environ.copy()
+    env["APPDATA"] = str(appdata_root)
+    env["ENGLISH_COACH_NO_WEBVIEW"] = "1"
+    env["ENGLISH_COACH_READY_FILE"] = str(probe_path)
+    env["ENGLISH_COACH_ALLOW_DEV_MACHINE_PATH"] = "1"
+    for key in _SANITIZED_ENV_KEYS:
+        env.pop(key, None)
+    process = subprocess.Popen(
+        [str(exe_path)],
+        cwd=str(exe_path.parent),
+        env=env,
+    )
+    payload: dict[str, Any] | None = None
+    deadline = time.time() + 20
+    try:
+        while time.time() < deadline:
+            if probe_path.exists():
+                payload = json.loads(probe_path.read_text(encoding="utf-8"))
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.5)
+        if process.poll() is None:
+            process.wait(timeout=30)
+        assert_true(payload is not None, "重复启动时未写出 probe 文件")
+        assert_true(payload.get("status") == "already_running", f"单实例保护未生效: {payload}")
+        assert_true(process.returncode == 0, f"重复启动退出码异常: {process.returncode}")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+
+def verify_shortcuts(mode: str, install_dir: Path, exe_path: Path) -> None:
+    log("验证桌面与开始菜单快捷方式")
+    expected = exe_path.resolve()
+    for shortcut in _app_shortcut_links(mode):
+        assert_true(shortcut.exists(), f"缺少快捷方式: {shortcut}")
+        actual = _read_shortcut_target(shortcut).resolve()
+        assert_true(actual == expected, f"快捷方式目标未更新: {shortcut} -> {actual}, expected {expected}")
+
+
 def assert_true(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -491,8 +583,7 @@ def maybe_activate_cloud(base_url: str, expected_version_mode: str) -> None:
         return
     admin_url, admin_token = _load_seller_admin_credentials()
     if not admin_url or not admin_token:
-        log("跳过 cloud 激活验证：未提供可用的卖家配置")
-        return
+        raise AssertionError("cloud smoke 缺少可用的卖家配置，不能跳过激活链路")
 
     status = request_json(f"{base_url}/api/license/status")
     assert_true(status.get("activation_available") is True, f"cloud build 未启用激活能力: {status}")
@@ -511,6 +602,41 @@ def maybe_activate_cloud(base_url: str, expected_version_mode: str) -> None:
     assert_true(post_status.get("active") is True, f"cloud activate 后 status 异常: {post_status}")
     assert_true(post_status.get("cloud_license_active") is True, f"cloud license 未激活: {post_status}")
     assert_true(post_status.get("ai_ready") is True, f"cloud AI 未就绪: {post_status}")
+
+
+def verify_chat_memory_smoke(base_url: str) -> None:
+    log("验证 chat remember / word-status / context")
+    started = request_json(f"{base_url}/api/chat/start", method="POST", body={}, timeout=60)
+    session_id = str(started.get("session_id") or "")
+    assert_true(bool(session_id), f"chat/start 未返回 session_id: {started}")
+    remembered = request_json(
+        f"{base_url}/api/chat/remember/{session_id}",
+        method="POST",
+        body={
+            "fact_type": "goal",
+            "fact_key": "smoke_goal",
+            "value": {"goal": "TOEFL 105"},
+        },
+        timeout=60,
+    )
+    assert_true(remembered.get("ok") is True, f"chat/remember 失败: {remembered}")
+    marked = request_json(
+        f"{base_url}/api/chat/word-status/{session_id}",
+        method="POST",
+        body={
+            "word": "mitigate",
+            "status": "unknown",
+            "definition_en": "to reduce severity",
+            "tags": ["toefl"],
+        },
+        timeout=60,
+    )
+    assert_true(marked.get("ok") is True, f"chat/word-status 失败: {marked}")
+    context = request_json(f"{base_url}/api/chat/context/{session_id}", timeout=60)
+    assert_true(any(item.get("fact_key") == "smoke_goal" for item in context.get("facts", [])), f"chat/context 缺少 remember 事实: {context}")
+    assert_true("mitigate" in context.get("review_words", []) or context.get("memory_summary", {}).get("review_due_count", 0) >= 1, f"chat/context 缺少 word-status 结果: {context}")
+    ended = request_json(f"{base_url}/api/chat/end/{session_id}", method="POST", body={}, timeout=60)
+    assert_true(ended.get("ok") is True, f"chat/end 失败: {ended}")
 
 
 def verify_first_launch(base_url: str, expected_version_mode: str) -> None:
@@ -540,6 +666,7 @@ def verify_page_shells(base_url: str, expected_version_mode: str) -> None:
     assert_true("days" in history, "history/daily 返回异常")
     assert_true("exams" in practice, "practice/catalog 返回异常")
     assert_true("next_action" in recommendation, "practice/recommendation 缺少 next_action")
+    assert_true("action_candidates" in recommendation, "practice/recommendation 缺少 action_candidates")
     assert_true(recommendation.get("has_profile") is True, "practice/recommendation 未识别 profile")
     assert_true("summary" in memory, "memory/status 缺少 summary")
     assert_true(memory.get("has_profile") is True, "memory/status 未识别 profile")
@@ -632,8 +759,10 @@ def verify_post_practice_state(base_url: str) -> None:
     assert_true(bool(coach["plan"]["summary"].get("improved_point")), "coach improved_point 为空")
     assert_true(bool(coach["plan"]["summary"]["tomorrow_reason"]), "coach tomorrow_reason 为空")
     assert_true("next_action" in coach, "coach/status 缺少 next_action")
+    assert_true("action_candidates" in coach, "coach/status 缺少 action_candidates")
     assert_true("summary" in memory and memory["summary"]["review_due_count"] >= 0, "memory/status summary 异常")
     assert_true("next_action" in recommendation, "practice/recommendation 缺少 next_action")
+    assert_true("action_candidates" in recommendation, "practice/recommendation 缺少 action_candidates")
 
 
 def run_flow(exe_path: Path, appdata_root: Path, label: str, expected_version_mode: str) -> None:
@@ -644,6 +773,7 @@ def run_flow(exe_path: Path, appdata_root: Path, label: str, expected_version_mo
         actual_pid = int(probe.get("pid") or 0) or None
         base_url = str(probe["url"]).rstrip("/")
         data_dir = appdata_root / "smoke-data"
+        verify_single_instance_guard(exe_path, appdata_root, label)
         verify_first_launch(base_url, expected_version_mode)
         complete_setup(base_url, data_dir)
         verify_page_shells(base_url, expected_version_mode)
@@ -651,6 +781,8 @@ def run_flow(exe_path: Path, appdata_root: Path, label: str, expected_version_mo
         complete_listening_session(base_url)
         verify_post_practice_state(base_url)
         maybe_activate_cloud(base_url, expected_version_mode)
+        if expected_version_mode == "cloud":
+            verify_chat_memory_smoke(base_url)
         log(f"{label} 验证通过")
     finally:
         if process is not None:
@@ -669,7 +801,6 @@ def run_installer(installer_path: Path, install_dir: Path) -> Path:
             "/VERYSILENT",
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
-            "/NOICONS",
             f"/DIR={install_dir}",
         ],
         check=True,
@@ -719,6 +850,7 @@ def main() -> int:
         run_flow(portable_exe, temp_root / "portable-appdata", "portable exe", args.expected_version_mode)
         install_dir = temp_root / "installed-app"
         installed_exe = run_installer(installer_exe, install_dir)
+        verify_shortcuts(args.expected_version_mode, install_dir, installed_exe)
         run_flow(installed_exe, temp_root / "installed-appdata", "installed exe", args.expected_version_mode)
         cleanup_installed_app(install_dir)
         cleanup_stale_smoke_uninstall_entries()

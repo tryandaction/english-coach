@@ -145,6 +145,19 @@ window.api = {
     }
     return r.json();
   },
+  async put(path, body) {
+    const r = await fetch(path, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: window._currentAbortSignal // Support request cancellation
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `API error ${r.status}`);
+    }
+    return r.json();
+  },
   // SSE helper: calls onEvent(type, data) for each event, returns when done
   async stream(path, body, onEvent) {
     const r = await fetch(path, {

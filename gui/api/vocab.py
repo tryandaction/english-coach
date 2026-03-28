@@ -68,6 +68,38 @@ def _lookup_existing_word(srs, word: str):
     ).fetchone()
 
 
+def _extract_word_updates(payload: BaseModel, *, include_word: bool = False, allow_blank: bool = False) -> dict[str, str]:
+    editable_fields = (
+        "word",
+        "definition_en",
+        "definition_zh",
+        "example",
+        "part_of_speech",
+        "pronunciation",
+        "synonyms",
+        "antonyms",
+        "derivatives",
+        "collocations",
+        "context_sentence",
+    )
+    raw = payload.model_dump()
+    updates: dict[str, str] = {}
+    for field in editable_fields:
+        if field == "word" and not include_word:
+            continue
+        value = raw.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if field == "word":
+            if text:
+                updates[field] = normalize_word(text)
+            continue
+        if allow_blank or text:
+            updates[field] = text
+    return updates
+
+
 def _card_to_dict(card) -> dict:
     return {
         "card_id": card.card_id,
@@ -354,15 +386,37 @@ def add_word(req: AddWordRequest):
     word = req.word.strip().lower()
     if not word:
         raise HTTPException(400, "Word is required")
-    # Check if already in deck
-    existing = srs._db.execute(
-        """SELECT c.card_id FROM srs_cards c
-           JOIN vocabulary v ON c.word_id = v.word_id
-           WHERE c.user_id=? AND v.word=?""",
-        (profile.user_id, word),
-    ).fetchone()
-    if existing:
-        return {"ok": True, "already_exists": True, "word": word}
+    existing_vocab = _lookup_existing_word(srs, word)
+    requested_updates = _extract_word_updates(req, include_word=False, allow_blank=False)
+
+    if existing_vocab:
+        word_id = existing_vocab["word_id"]
+        updated_existing = False
+        if requested_updates:
+            srs.update_word_fields(word_id, **requested_updates)
+            updated_existing = True
+        existing = srs._db.execute(
+            """SELECT c.card_id FROM srs_cards c
+               WHERE c.user_id=? AND c.word_id=?""",
+            (profile.user_id, word_id),
+        ).fetchone()
+        if existing:
+            return {
+                "ok": True,
+                "already_exists": True,
+                "word": word,
+                "word_id": word_id,
+                "updated_existing": updated_existing,
+            }
+        srs.enroll_words(profile.user_id, [word_id])
+        return {
+            "ok": True,
+            "already_exists": False,
+            "word": word,
+            "word_id": word_id,
+            "reused_existing": True,
+            "updated_existing": updated_existing,
+        }
 
     word_id = srs.add_word(
         word=word,

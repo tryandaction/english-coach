@@ -45,13 +45,11 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 ; UI settings
 WizardStyle=modern
-DisableWelcomePage=no
+DisableWelcomePage=yes
+DisableDirPage=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-
-[Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 Source: "{#ProjectRoot}\releases\{#MyAppPayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -69,7 +67,7 @@ Source: "{#ProjectRoot}\releases\cloud_activation_config.json"; DestDir: "{app}"
 [Icons]
 Name: "{group}\English Coach"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\English Coach"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\English Coach"; Filename: "{app}\{#MyAppExeName}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
@@ -86,6 +84,11 @@ const
     '  target_exam: ""' + #13#10 +
     '  target_exam_date: ""' + #13#10;
 
+var
+  ReplaceExistingPage: TInputOptionWizardPage;
+  PreviousInstallDetected: Boolean;
+  PreviousInstallSummary: string;
+
 function DataDirReviewFlagPath(): string;
 begin
   Result := ExpandConstant('{userappdata}\EnglishCoach\pending_data_dir_review.flag');
@@ -94,6 +97,66 @@ end;
 function UninstallRegSubkey(): string;
 begin
   Result := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppUninstallKey}';
+end;
+
+procedure RegisterPreviousInstall(RootKey: Integer; const ScopeLabel: string);
+var
+  SubKey, DisplayName, InstallLocation, Summary: string;
+begin
+  SubKey := UninstallRegSubkey();
+  if not RegValueExists(RootKey, SubKey, 'DisplayName') then
+    exit;
+  PreviousInstallDetected := True;
+  if not RegQueryStringValue(RootKey, SubKey, 'DisplayName', DisplayName) then
+    DisplayName := '{#MyAppName}';
+  if not RegQueryStringValue(RootKey, SubKey, 'InstallLocation', InstallLocation) then
+    InstallLocation := '';
+  Summary := ScopeLabel + ': ' + DisplayName;
+  if InstallLocation <> '' then
+    Summary := Summary + ' (' + InstallLocation + ')';
+  if PreviousInstallSummary <> '' then
+    PreviousInstallSummary := PreviousInstallSummary + #13#10;
+  PreviousInstallSummary := PreviousInstallSummary + Summary;
+end;
+
+procedure DetectPreviousInstalls;
+begin
+  PreviousInstallDetected := False;
+  PreviousInstallSummary := '';
+  RegisterPreviousInstall(HKCU, 'Current user');
+  RegisterPreviousInstall(HKLM, 'All users');
+end;
+
+function ShouldReplaceExistingInstall(): Boolean;
+begin
+  if not PreviousInstallDetected then
+  begin
+    Result := False;
+    exit;
+  end;
+  if WizardSilent or (ReplaceExistingPage = nil) then
+  begin
+    Result := True;
+    exit;
+  end;
+  Result := ReplaceExistingPage.Values[0];
+end;
+
+function AppendIfMissing(const Params: string; const Token: string): string;
+begin
+  Result := Params;
+  if Pos(Uppercase(Token), Uppercase(' ' + Params + ' ')) = 0 then
+    Result := Trim(Result + ' ' + Token);
+end;
+
+function NormalizeSilentUninstallParams(const Params: string): string;
+begin
+  Result := Params;
+  Result := AppendIfMissing(Result, '/VERYSILENT');
+  Result := AppendIfMissing(Result, '/SUPPRESSMSGBOXES');
+  Result := AppendIfMissing(Result, '/NORESTART');
+  Result := AppendIfMissing(Result, '/SP-');
+  Result := AppendIfMissing(Result, '/NOCANCEL');
 end;
 
 function ShouldResetUserConfig(): Boolean;
@@ -211,46 +274,30 @@ end;
 
 function UninstallPreviousInstall(RootKey: Integer): Boolean;
 var
-  SubKey, DisplayName, QuietCommand, UninstallCommand, InstallLocation: string;
+  SubKey, QuietCommand, UninstallCommand, InstallLocation: string;
   Filename, Params: string;
   ResultCode: Integer;
-  Prompt: string;
 begin
   Result := True;
+  if not ShouldReplaceExistingInstall() then
+    exit;
   SubKey := UninstallRegSubkey();
   if not RegValueExists(RootKey, SubKey, 'DisplayName') then
     exit;
 
-  RegQueryStringValue(RootKey, SubKey, 'DisplayName', DisplayName);
   RegQueryStringValue(RootKey, SubKey, 'InstallLocation', InstallLocation);
   QuietCommand := '';
   UninstallCommand := '';
   RegQueryStringValue(RootKey, SubKey, 'QuietUninstallString', QuietCommand);
   RegQueryStringValue(RootKey, SubKey, 'UninstallString', UninstallCommand);
   if QuietCommand <> '' then
+  begin
     SplitCommand(QuietCommand, Filename, Params)
+  end
   else
-  begin
     SplitCommand(UninstallCommand, Filename, Params);
-    if Filename <> '' then
-      Params := Trim(Params + ' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART');
-  end;
-
-  if not WizardSilent then
-  begin
-    Prompt :=
-      'Detected an older installation:' + #13#10 + #13#10 +
-      DisplayName + #13#10 +
-      InstallLocation + #13#10 + #13#10 +
-      'Setup can close the old version, remove it, and then install the new version.' + #13#10 +
-      'Your study data in %APPDATA%\EnglishCoach will be preserved.' + #13#10 + #13#10 +
-      'Continue?';
-    if MsgBox(Prompt, mbConfirmation, MB_YESNO) <> IDYES then
-    begin
-      Result := False;
-      exit;
-    end;
-  end;
+  if Filename <> '' then
+    Params := NormalizeSilentUninstallParams(Params);
 
   TerminateRunningAppProcesses;
 
@@ -262,13 +309,6 @@ begin
       if (InstallLocation = '') or (not DirExists(InstallLocation)) then
       begin
         Result := True;
-        if not WizardSilent then
-          MsgBox(
-            'Detected a stale uninstall entry for an older version, but the old files are already gone.' + #13#10 +
-            'Setup will continue with the new installation.',
-            mbInformation,
-            MB_OK
-          );
       end;
     end;
     exit;
@@ -283,7 +323,7 @@ begin
   end
   else
   begin
-    if not ShellExec('runas', Filename, Params, '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode) then
+    if not ShellExec('runas', Filename, Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       Result := False
     else
       Result := ResultCode = 0;
@@ -326,19 +366,26 @@ begin
 end;
 
 procedure InitializeWizard;
-var
-  WelcomeLabel: TNewStaticText;
 begin
-  WelcomeLabel := TNewStaticText.Create(WizardForm);
-  WelcomeLabel.Parent := WizardForm.WelcomePage;
-  WelcomeLabel.Caption :=
-    'This is the Cloud edition of English Coach.' + #13#10 + #13#10 +
-    'Includes bundled starter content and built-in vocabulary libraries.' + #13#10 + #13#10 +
-    'If this build includes activation settings, you can activate it with a license key.' + #13#10 +
-    'Otherwise, configure your own API key and use the offline-capable flows.' + #13#10 + #13#10 +
-    'Upgrades preserve your existing study data, custom word books, and settings stored in %APPDATA%\EnglishCoach.';
-  WelcomeLabel.AutoSize := True;
-  WelcomeLabel.WordWrap := True;
-  WelcomeLabel.Top := WizardForm.WelcomeLabel2.Top + WizardForm.WelcomeLabel2.Height + 20;
-  WelcomeLabel.Width := WizardForm.WelcomeLabel2.Width;
+  DetectPreviousInstalls;
+  ReplaceExistingPage := CreateInputOptionPage(
+    wpReady,
+    'Replace Existing Installation',
+    'Existing English Coach installation found',
+    'Setup detected an older English Coach installation.' + #13#10 +
+    PreviousInstallSummary + #13#10 + #13#10 +
+    'Choose whether setup should automatically remove the old installation before copying the new files.' + #13#10 +
+    'Your study data in %APPDATA%\EnglishCoach will be preserved.',
+    False,
+    False
+  );
+  ReplaceExistingPage.Add('Automatically replace the detected older installation');
+  ReplaceExistingPage.Values[0] := True;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (ReplaceExistingPage <> nil) and (PageID = ReplaceExistingPage.ID) then
+    Result := not PreviousInstallDetected;
 end;

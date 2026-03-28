@@ -124,6 +124,7 @@ class PackagingContractTests(unittest.TestCase):
             seller_candidates = private_paths.seller_config_candidates()
         self.assertTrue(str(activation_candidates[0]).replace("\\", "/").endswith("private_commercial/cloud_activation_config.json"))
         self.assertTrue(str(seller_candidates[0]).replace("\\", "/").endswith("private_commercial/seller_cloud_config.json"))
+        self.assertFalse(any(str(path).replace("\\", "/").endswith("releases/cloud_activation_config.json") for path in activation_candidates))
 
     def test_opensource_spec_has_no_machine_specific_site_packages_path(self) -> None:
         spec_text = (ROOT / "release_tooling" / "specs" / "english_coach_opensource.spec").read_text(encoding="utf-8")
@@ -156,6 +157,21 @@ class PackagingContractTests(unittest.TestCase):
             self.assertIn("PrepareToInstall", text, path.name)
             self.assertIn("UninstallPreviousInstall", text, path.name)
             self.assertIn("taskkill.exe", text, path.name)
+            self.assertIn("CreateInputOptionPage", text, path.name)
+            self.assertIn("ShouldReplaceExistingInstall", text, path.name)
+            self.assertIn("NormalizeSilentUninstallParams", text, path.name)
+            self.assertIn("/NOCANCEL", text, path.name)
+            self.assertNotIn("MsgBox(Prompt", text, path.name)
+
+    def test_installers_use_streamlined_wizard_pages(self) -> None:
+        for path in (
+            ROOT / "release_tooling" / "installers" / "installer_cloud.iss",
+            ROOT / "release_tooling" / "installers" / "installer_opensource.iss",
+        ):
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("DisableWelcomePage=yes", text, path.name)
+            self.assertIn("DisableDirPage=yes", text, path.name)
+            self.assertNotIn('Name: "desktopicon"', text, path.name)
 
     def test_frozen_config_reset_targets_temp_smoke_data_dir(self) -> None:
         cfg = {"data_dir": r"C:\Users\me\AppData\Local\Temp\english_coach_release_smoke_abcd\smoke-data"}

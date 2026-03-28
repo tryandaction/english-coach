@@ -9,13 +9,8 @@ import socket
 import sys
 import threading
 import time
+import atexit
 from pathlib import Path
-
-# Static imports for PyInstaller compatibility
-# NOTE: uvicorn imported dynamically to avoid Python 3.13 type annotation issues
-from gui.coach_runtime import start_coach_scheduler
-from gui.deps import warm_components
-from gui.server import create_app
 
 # Ensure project root is on sys.path when running as exe
 _ROOT = Path(__file__).parent.parent
@@ -24,6 +19,7 @@ if str(_ROOT) not in sys.path:
 
 # Debug log — written to user home so we can diagnose startup issues
 _LOG = os.path.join(os.path.expanduser("~"), "english_coach_debug.log")
+_INSTANCE_MUTEX_HANDLE = None
 
 def _log(msg: str) -> None:
     try:
@@ -36,6 +32,47 @@ def _log(msg: str) -> None:
 def _env_flag(name: str) -> bool:
     value = str(os.environ.get(name, "") or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _single_instance_mutex_name() -> str:
+    source = Path(sys.executable if getattr(sys, "frozen", False) else __file__).stem
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in source.lower())
+    return f"Local\\EnglishCoach_{normalized}_Singleton"
+
+
+def _release_single_instance_mutex() -> None:
+    global _INSTANCE_MUTEX_HANDLE
+    if _INSTANCE_MUTEX_HANDLE is None or os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.CloseHandle(_INSTANCE_MUTEX_HANDLE)
+    except Exception:
+        pass
+    _INSTANCE_MUTEX_HANDLE = None
+
+
+def _acquire_single_instance() -> bool:
+    global _INSTANCE_MUTEX_HANDLE
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.CreateMutexW(None, False, _single_instance_mutex_name())
+        if not handle:
+            _log("CreateMutexW failed; continuing without single-instance guard")
+            return True
+        _INSTANCE_MUTEX_HANDLE = handle
+        atexit.register(_release_single_instance_mutex)
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            _log("Another instance is already running; exiting duplicate launcher")
+            return False
+    except Exception as e:
+        _log(f"Single-instance guard unavailable: {type(e).__name__}: {e}")
+    return True
 
 
 def _write_probe_file(path: str, payload: dict[str, object]) -> None:
@@ -148,6 +185,8 @@ def _start_server(port: int) -> None:
     _log(f"=== Starting server on port {port} ===")
     try:
         _log("Creating FastAPI app...")
+        from gui.server import create_app
+
         app = create_app()
         _log("FastAPI app created successfully")
 
@@ -213,6 +252,21 @@ def main() -> None:
     _log(f"Smoke mode: {'enabled' if no_webview else 'disabled'}")
     if ready_file:
         _log(f"Ready file configured: {ready_file}")
+
+    if not _acquire_single_instance():
+        _write_probe_file(
+            ready_file,
+            {
+                "status": "already_running",
+                "message": "Another English Coach instance is already running.",
+                "log_path": _LOG,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
+        raise SystemExit(0)
+
+    from gui.coach_runtime import start_coach_scheduler
+    from gui.deps import warm_components
 
     existing_port = _find_existing_server([8765, 8766, 8767, 8768, 8769, 8770])
     if existing_port:

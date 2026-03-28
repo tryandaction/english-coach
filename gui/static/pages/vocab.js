@@ -108,6 +108,342 @@ function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function normalizeWordInput(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function createWordDraft(source = {}) {
+  return {
+    word_id: String(source.word_id || ''),
+    source: String(source.source || ''),
+    word: String(source.word || ''),
+    definition_en: String(source.definition_en || ''),
+    definition_zh: String(source.definition_zh || ''),
+    part_of_speech: String(source.part_of_speech || ''),
+    pronunciation: String(source.pronunciation || ''),
+    example: String(source.example || ''),
+    synonyms: String(source.synonyms || ''),
+    antonyms: String(source.antonyms || ''),
+    derivatives: String(source.derivatives || ''),
+    collocations: String(source.collocations || ''),
+    context_sentence: String(source.context_sentence || ''),
+  };
+}
+
+function getWordEditorNodes(root, prefix) {
+  const pick = suffix => root.querySelector(`#${prefix}-${suffix}`);
+  return {
+    wordInput: pick('word'),
+    searchResults: pick('search-results'),
+    status: pick('status'),
+    preview: pick('preview'),
+    message: pick('message'),
+    aiFill: pick('ai-fill'),
+    clear: pick('clear'),
+    close: pick('close'),
+    submit: pick('submit'),
+    fields: {
+      definition_en: pick('def-en'),
+      definition_zh: pick('def-zh'),
+      part_of_speech: pick('pos'),
+      pronunciation: pick('pron'),
+      example: pick('example'),
+      synonyms: pick('synonyms'),
+      antonyms: pick('antonyms'),
+      collocations: pick('collocations'),
+      derivatives: pick('derivatives'),
+      context_sentence: pick('context'),
+    },
+  };
+}
+
+function setWordSelection(nodes, draft) {
+  if (!nodes.wordInput) return;
+  const normalizedWord = normalizeWordInput(draft.word);
+  if (draft.word_id) {
+    nodes.wordInput.dataset.wordId = draft.word_id;
+    nodes.wordInput.dataset.selectedWord = normalizedWord;
+    nodes.wordInput.dataset.wordSource = draft.source || '';
+  } else {
+    delete nodes.wordInput.dataset.wordId;
+    delete nodes.wordInput.dataset.selectedWord;
+    delete nodes.wordInput.dataset.wordSource;
+  }
+}
+
+function collectWordEditorDraft(root, prefix) {
+  const nodes = getWordEditorNodes(root, prefix);
+  return createWordDraft({
+    word_id: nodes.wordInput?.dataset.wordId || '',
+    source: nodes.wordInput?.dataset.wordSource || '',
+    word: nodes.wordInput?.value.trim() || '',
+    definition_en: nodes.fields.definition_en?.value.trim() || '',
+    definition_zh: nodes.fields.definition_zh?.value.trim() || '',
+    part_of_speech: nodes.fields.part_of_speech?.value.trim() || '',
+    pronunciation: nodes.fields.pronunciation?.value.trim() || '',
+    example: nodes.fields.example?.value.trim() || '',
+    synonyms: nodes.fields.synonyms?.value.trim() || '',
+    antonyms: nodes.fields.antonyms?.value.trim() || '',
+    derivatives: nodes.fields.derivatives?.value.trim() || '',
+    collocations: nodes.fields.collocations?.value.trim() || '',
+    context_sentence: nodes.fields.context_sentence?.value.trim() || '',
+  });
+}
+
+function renderWordPreviewHtml(draft) {
+  const word = draft.word || 'Word preview';
+  const meta = [draft.part_of_speech, draft.pronunciation].filter(Boolean);
+  const notes = [
+    draft.definition_en ? `<div class="vocab-editor-preview-block"><div class="vocab-editor-preview-label">Definition</div><div>${escHtml(draft.definition_en)}</div></div>` : '',
+    draft.definition_zh ? `<div class="vocab-editor-preview-block"><div class="vocab-editor-preview-label">中文释义</div><div>${escHtml(draft.definition_zh)}</div></div>` : '',
+    draft.example ? `<div class="vocab-editor-preview-block"><div class="vocab-editor-preview-label">Example</div><div>${escHtml(draft.example)}</div></div>` : '',
+    draft.context_sentence ? `<div class="vocab-editor-preview-block"><div class="vocab-editor-preview-label">Context</div><div>${escHtml(draft.context_sentence)}</div></div>` : '',
+  ].filter(Boolean);
+  const chips = [
+    draft.synonyms ? `Synonyms · ${escHtml(draft.synonyms)}` : '',
+    draft.antonyms ? `Antonyms · ${escHtml(draft.antonyms)}` : '',
+    draft.collocations ? `Collocations · ${escHtml(draft.collocations)}` : '',
+    draft.derivatives ? `Derivatives · ${escHtml(draft.derivatives)}` : '',
+  ].filter(Boolean);
+  const stateTag = draft.word_id
+    ? '<span class="tag">Existing entry</span>'
+    : '<span class="tag tag-green">New draft</span>';
+  const sourceTag = draft.source ? `<span class="tag">${escHtml(draft.source)}</span>` : '';
+
+  return `
+    <div class="vocab-editor-preview-card">
+      <div class="vocab-editor-preview-head">
+        <span class="tag">Live Card</span>
+        ${stateTag}
+        ${sourceTag}
+      </div>
+      <div class="vocab-editor-preview-word">${escHtml(word)}</div>
+      ${meta.length ? `<div class="vocab-editor-preview-meta">${meta.map(escHtml).join(' · ')}</div>` : '<div class="vocab-editor-preview-meta">Word / part of speech / pronunciation update here in real time.</div>'}
+      <div class="vocab-editor-preview-body">
+        ${notes.length ? notes.join('') : '<div class="vocab-editor-preview-empty">Fill the form or run AI Fill to build the card preview.</div>'}
+      </div>
+      ${chips.length ? `<div class="vocab-editor-preview-tags">${chips.map(text => `<span class="tag">${text}</span>`).join('')}</div>` : ''}
+    </div>
+  `;
+}
+
+function syncWordEditorPreview(root, prefix) {
+  const nodes = getWordEditorNodes(root, prefix);
+  if (!nodes.preview) return;
+  nodes.preview.innerHTML = renderWordPreviewHtml(collectWordEditorDraft(root, prefix));
+}
+
+function applyWordEditorDraft(root, prefix, draft) {
+  const nodes = getWordEditorNodes(root, prefix);
+  const next = createWordDraft(draft);
+  if (nodes.wordInput) nodes.wordInput.value = next.word;
+  Object.entries(nodes.fields).forEach(([key, field]) => {
+    if (field) field.value = next[key] || '';
+  });
+  setWordSelection(nodes, next);
+  syncWordEditorPreview(root, prefix);
+}
+
+function resetWordEditor(root, prefix, draft = createWordDraft()) {
+  const nodes = getWordEditorNodes(root, prefix);
+  applyWordEditorDraft(root, prefix, draft);
+  if (nodes.searchResults) nodes.searchResults.innerHTML = '';
+  if (nodes.message) nodes.message.innerHTML = '';
+}
+
+function setWordEditorStatus(root, prefix, text, tone = 'muted') {
+  const nodes = getWordEditorNodes(root, prefix);
+  if (!nodes.status) return;
+  nodes.status.textContent = text || '';
+  nodes.status.dataset.tone = tone;
+}
+
+function buildWordSavePayload(draft, includeWordId = false) {
+  const payload = {
+    word: draft.word,
+    definition_en: draft.definition_en,
+    definition_zh: draft.definition_zh,
+    part_of_speech: draft.part_of_speech,
+    pronunciation: draft.pronunciation,
+    example: draft.example,
+    synonyms: draft.synonyms,
+    antonyms: draft.antonyms,
+    derivatives: draft.derivatives,
+    collocations: draft.collocations,
+    context_sentence: draft.context_sentence,
+  };
+  if (includeWordId && draft.word_id) payload.word_id = draft.word_id;
+  return payload;
+}
+
+function wordEditorMarkup(prefix, options = {}) {
+  const {
+    title = '',
+    subtitle = '',
+    primaryLabel = 'Save',
+    primaryClass = 'btn-primary',
+    clearLabel = 'Clear',
+    closeLabel = 'Close',
+    showClose = false,
+  } = options;
+  return `
+    <div class="vocab-editor-shell">
+      ${title ? `
+        <div class="vocab-editor-header">
+          <div>
+            <div class="vocab-editor-title">${title}</div>
+            ${subtitle ? `<div class="vocab-editor-subtitle">${subtitle}</div>` : ''}
+          </div>
+          ${showClose ? `<button class="btn btn-outline" id="${prefix}-close" style="font-size:12px;padding:6px 12px">✕ ${closeLabel}</button>` : ''}
+        </div>` : ''}
+      <div class="vocab-editor-toolbar">
+        <input id="${prefix}-word" type="text" placeholder="Search or type a word…" autocomplete="off">
+        <button class="btn btn-outline" id="${prefix}-ai-fill" style="white-space:nowrap">✨ AI Fill</button>
+        <button class="btn btn-outline" id="${prefix}-clear" style="white-space:nowrap">↺ ${clearLabel}</button>
+      </div>
+      <div id="${prefix}-search-results" class="vocab-editor-search-results"></div>
+      <div id="${prefix}-status" class="vocab-editor-status" data-tone="muted"></div>
+      <div class="vocab-editor-grid">
+        <div id="${prefix}-preview"></div>
+        <div class="vocab-editor-form">
+          <div class="form-group">
+            <label>Definition (English)</label>
+            <textarea id="${prefix}-def-en" rows="2" placeholder="e.g. to speak for a long time in a formal way"></textarea>
+          </div>
+          <div class="form-group">
+            <label>Definition (Chinese) <span style="color:var(--text-dim)">(optional)</span></label>
+            <textarea id="${prefix}-def-zh" rows="2" placeholder="例如：正式发表长篇讲话"></textarea>
+          </div>
+          <div class="vocab-editor-field-grid">
+            <div class="form-group"><label>Part of speech</label><input id="${prefix}-pos" type="text" placeholder="verb"></div>
+            <div class="form-group"><label>Pronunciation</label><input id="${prefix}-pron" type="text" placeholder="/pɒnˈtɪf.ɪ.keɪt/"></div>
+          </div>
+          <div class="form-group">
+            <label>Example sentence</label>
+            <textarea id="${prefix}-example" rows="3" placeholder="e.g. He began to pontificate about politics at dinner."></textarea>
+          </div>
+          <div class="vocab-editor-field-grid">
+            <div class="form-group"><label>Synonyms</label><input id="${prefix}-synonyms" type="text" placeholder="lecture, sermonize"></div>
+            <div class="form-group"><label>Antonyms</label><input id="${prefix}-antonyms" type="text" placeholder="listen, defer"></div>
+          </div>
+          <div class="vocab-editor-field-grid">
+            <div class="form-group"><label>Collocations</label><input id="${prefix}-collocations" type="text" placeholder="pontificate on politics"></div>
+            <div class="form-group"><label>Derivatives</label><input id="${prefix}-derivatives" type="text" placeholder="pontification"></div>
+          </div>
+          <div class="form-group">
+            <label>Context sentence</label>
+            <textarea id="${prefix}-context" rows="2" placeholder="Add a usage note or scenario for this card."></textarea>
+          </div>
+        </div>
+      </div>
+      <div id="${prefix}-message"></div>
+      <div class="vocab-editor-actions">
+        <button class="btn ${primaryClass}" id="${prefix}-submit">${primaryLabel}</button>
+      </div>
+    </div>
+  `;
+}
+
+async function searchVocab(q, resultsEl, onPick) {
+  try {
+    const results = await api.get(`/api/wordbooks/search/vocab?q=${encodeURIComponent(q)}&limit=6`);
+    if (!results.length) {
+      resultsEl.innerHTML = '';
+      return;
+    }
+    resultsEl.innerHTML = `
+      <div class="vocab-editor-search-panel">
+        ${results.map((r, index) => `
+          <button type="button" class="vocab-editor-search-row" data-result-index="${index}">
+            <div style="flex:1;min-width:0;text-align:left">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span style="font-weight:700">${escHtml(r.word)}</span>
+                ${r.part_of_speech ? `<span style="font-size:11px;color:var(--text-dim)">${escHtml(r.part_of_speech)}</span>` : ''}
+                ${r.pronunciation ? `<span style="font-size:11px;color:var(--accent)">${escHtml(r.pronunciation)}</span>` : ''}
+              </div>
+              <div style="font-size:12px;color:var(--text-dim);margin-top:4px">${escHtml(r.definition_en || '')}${r.definition_zh ? ` · ${escHtml(r.definition_zh)}` : ''}</div>
+            </div>
+            <span class="tag">${escHtml(r.source || 'library')}</span>
+          </button>`).join('')}
+      </div>
+    `;
+    resultsEl.querySelectorAll('.vocab-editor-search-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const match = results[Number(row.dataset.resultIndex)];
+        if (match) onPick(match);
+      });
+    });
+  } catch {
+    resultsEl.innerHTML = '';
+  }
+}
+
+function bindWordEditor(root, prefix, options = {}) {
+  const nodes = getWordEditorNodes(root, prefix);
+  const searchEnabled = options.searchEnabled !== false;
+  let searchTimer = null;
+
+  const refreshPreview = () => syncWordEditorPreview(root, prefix);
+  refreshPreview();
+
+  nodes.wordInput?.addEventListener('input', () => {
+    const normalized = normalizeWordInput(nodes.wordInput.value);
+    const selectedWord = normalizeWordInput(nodes.wordInput.dataset.selectedWord || '');
+    if (nodes.wordInput.dataset.wordId && normalized !== selectedWord) {
+      setWordSelection(nodes, createWordDraft());
+      setWordEditorStatus(root, prefix, 'Switched to a new draft. Search again to reuse an existing entry.', 'muted');
+    }
+    refreshPreview();
+    if (!searchEnabled || !nodes.searchResults) return;
+    clearTimeout(searchTimer);
+    if (normalized.length < 2) {
+      nodes.searchResults.innerHTML = '';
+      return;
+    }
+    searchTimer = setTimeout(() => {
+      searchVocab(nodes.wordInput.value.trim(), nodes.searchResults, (match) => {
+        applyWordEditorDraft(root, prefix, createWordDraft(match));
+        if (nodes.searchResults) nodes.searchResults.innerHTML = '';
+        setWordEditorStatus(root, prefix, 'Loaded existing entry. Save to update this card and keep everything in sync.', 'info');
+        options.onPick?.(match);
+      });
+    }, 250);
+  });
+
+  Object.values(nodes.fields).forEach(field => field?.addEventListener('input', refreshPreview));
+
+  nodes.aiFill?.addEventListener('click', async () => {
+    const word = nodes.wordInput?.value.trim();
+    if (!word) {
+      nodes.wordInput?.focus();
+      return;
+    }
+    nodes.aiFill.disabled = true;
+    setWordEditorStatus(root, prefix, '✨ Fetching AI enrichment…', 'info');
+    try {
+      const current = collectWordEditorDraft(root, prefix);
+      const enriched = await api.post('/api/vocab/enrich', { word });
+      applyWordEditorDraft(root, prefix, { ...current, ...enriched, word });
+      setWordEditorStatus(root, prefix, '✓ AI fill complete. Preview has been refreshed.', 'success');
+    } catch (e) {
+      setWordEditorStatus(root, prefix, `AI unavailable: ${e.message}`, 'error');
+    }
+    nodes.aiFill.disabled = false;
+  });
+
+  nodes.clear?.addEventListener('click', () => {
+    if (typeof options.onClear === 'function') {
+      options.onClear();
+    } else {
+      resetWordEditor(root, prefix);
+      setWordEditorStatus(root, prefix, 'Draft cleared.', 'muted');
+    }
+  });
+
+  nodes.close?.addEventListener('click', () => options.onClose?.());
+  nodes.submit?.addEventListener('click', async () => options.onSubmit?.());
+}
+
 function setAutoTts(enabled) {
   _autoTts = !!enabled;
   localStorage.setItem(AUTO_TTS_KEY, String(_autoTts));
@@ -879,24 +1215,29 @@ async function showBookDetail(el, content, book) {
   try {
     const data = await api.get(`/api/wordbooks/${book.book_id}/words`);
     _currentBook = data.book;
-    const row = content.querySelector('#book-stats-row');
-    row.innerHTML = `
-      <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
-        <div style="font-size:22px;font-weight:700">${data.book.word_count || 0}</div>
-        <div style="font-size:11px;color:var(--text-dim)">Total words</div>
-      </div>
-      <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
-        <div style="font-size:22px;font-weight:700">${data.book.due_today || 0}</div>
-        <div style="font-size:11px;color:var(--text-dim)">Due today</div>
-      </div>
-      <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
-        <div style="font-size:22px;font-weight:700">${data.book.is_builtin ? 'Built-in' : 'Custom'}</div>
-        <div style="font-size:11px;color:var(--text-dim)">Book type</div>
-      </div>`;
-    renderWordList(content, book, '', data.words);
+    renderBookStatsRow(content, data.book);
+    renderWordList(content, data.book, '', data.words);
   } catch (e) {
     content.querySelector('#book-words-container').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
+}
+
+function renderBookStatsRow(content, book) {
+  const row = content.querySelector('#book-stats-row');
+  if (!row) return;
+  row.innerHTML = `
+    <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
+      <div style="font-size:22px;font-weight:700">${book.word_count || 0}</div>
+      <div style="font-size:11px;color:var(--text-dim)">Total words</div>
+    </div>
+    <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
+      <div style="font-size:22px;font-weight:700">${book.due_today || 0}</div>
+      <div style="font-size:11px;color:var(--text-dim)">Due today</div>
+    </div>
+    <div class="card" style="flex:1;min-width:90px;text-align:center;padding:14px">
+      <div style="font-size:22px;font-weight:700">${book.is_builtin ? 'Built-in' : 'Custom'}</div>
+      <div style="font-size:11px;color:var(--text-dim)">Book type</div>
+    </div>`;
 }
 
 function proficiencyDot(interval) {
@@ -905,6 +1246,58 @@ function proficiencyDot(interval) {
   if (interval < 4)  return { color: '#f5c842', label: 'Learning' };
   if (interval < 15) return { color: '#4f8ef7', label: 'Young' };
   return { color: '#3ecf8e', label: 'Mature' };
+}
+
+function openInlineWordEditor(host, word, book, content) {
+  const prefix = `edit-${word.word_id}`;
+  const originalDraft = createWordDraft(word);
+  host.style.display = '';
+  host.innerHTML = wordEditorMarkup(prefix, {
+    title: 'Edit Card',
+    subtitle: 'Saving here updates the same vocabulary card everywhere it appears in your library.',
+    primaryLabel: 'Save Changes',
+    primaryClass: 'btn-primary',
+    clearLabel: 'Reset',
+    closeLabel: 'Cancel',
+    showClose: true,
+  });
+
+  bindWordEditor(host, prefix, {
+    searchEnabled: false,
+    onClose: () => {
+      host.innerHTML = '';
+      host.style.display = 'none';
+    },
+    onClear: () => {
+      applyWordEditorDraft(host, prefix, originalDraft);
+      setWordEditorStatus(host, prefix, 'Restored the last saved card.', 'muted');
+    },
+    onSubmit: async () => {
+      const nodes = getWordEditorNodes(host, prefix);
+      const draft = collectWordEditorDraft(host, prefix);
+      if (!draft.word) {
+        nodes.wordInput?.focus();
+        return;
+      }
+      nodes.submit.disabled = true;
+      try {
+        const updated = await api.put(`/api/wordbooks/${book.book_id}/words/${word.word_id}`, buildWordSavePayload(draft, false));
+        const next = createWordDraft(updated);
+        const targetIndex = _allWords.findIndex(item => item.word_id === word.word_id);
+        if (targetIndex >= 0) {
+          _allWords[targetIndex] = { ..._allWords[targetIndex], ...next };
+        }
+        setWordEditorStatus(host, prefix, '✓ Card saved. List is refreshing…', 'success');
+        renderWordList(content, book, content.querySelector('#word-filter')?.value.trim() || '', _allWords);
+      } catch (e) {
+        nodes.message.innerHTML = `<div class="alert alert-error" style="margin-bottom:8px">${e.message}</div>`;
+      }
+      nodes.submit.disabled = false;
+    },
+  });
+
+  applyWordEditorDraft(host, prefix, originalDraft);
+  setWordEditorStatus(host, prefix, 'Edit the text, then save. You can also run AI Fill to refresh the card.', 'info');
 }
 
 function renderWordList(content, book, filter, words) {
@@ -973,6 +1366,11 @@ function renderWordList(content, book, filter, words) {
               <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
                 ${['star','error','writing','listening'].map(tag => `<button class="inline-tag-btn" data-tag="${tag}" data-word-id="${w.word_id}" style="padding:3px 8px;border-radius:12px;border:1px solid var(--border);background:var(--bg3);color:var(--text-dim);font-size:11px;cursor:pointer">${tag==='star'?'⭐':tag==='error'?'❌':tag==='writing'?'✍️':'🎧'} ${tag}</button>`).join('')}
               </div>
+              <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn btn-outline btn-word-edit" data-word-id="${w.word_id}" style="font-size:12px;padding:5px 12px">✏️ Edit Card</button>
+                ${book.is_builtin ? '' : `<button class="btn btn-outline btn-word-remove" data-word-id="${w.word_id}" style="font-size:12px;padding:5px 12px;color:var(--red)">🗑 Remove from Book</button>`}
+              </div>
+              <div class="inline-word-editor-host" data-word-id="${w.word_id}" style="display:none;margin-top:12px"></div>
             </div>
           </div>`;
         }).join('')}
@@ -1035,6 +1433,51 @@ function renderWordList(content, book, filter, words) {
       });
     });
 
+    container.querySelectorAll('.btn-word-edit').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const wid = btn.dataset.wordId;
+        const word = _allWords.find(item => item.word_id === wid);
+        const detail = btn.closest('.word-row-detail');
+        const host = detail?.querySelector(`.inline-word-editor-host[data-word-id="${wid}"]`);
+        if (!word || !host) return;
+        const isOpen = host.style.display !== 'none' && host.innerHTML.trim();
+        container.querySelectorAll('.inline-word-editor-host').forEach(otherHost => {
+          if (otherHost !== host) {
+            otherHost.innerHTML = '';
+            otherHost.style.display = 'none';
+          }
+        });
+        if (isOpen) {
+          host.innerHTML = '';
+          host.style.display = 'none';
+          return;
+        }
+        openInlineWordEditor(host, word, book, content);
+      });
+    });
+
+    container.querySelectorAll('.btn-word-remove').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const wid = btn.dataset.wordId;
+        const word = _allWords.find(item => item.word_id === wid);
+        if (!wid || !word) return;
+        if (!window.confirm(`Remove "${word.word}" from "${book.name}"?`)) return;
+        btn.disabled = true;
+        try {
+          await fetch(`/api/wordbooks/${book.book_id}/words/${wid}`, { method: 'DELETE' });
+          const data = await api.get(`/api/wordbooks/${book.book_id}/words`);
+          _currentBook = data.book;
+          renderBookStatsRow(content, data.book);
+          _allWords = data.words;
+          renderWordList(content, data.book, content.querySelector('#word-filter')?.value.trim() || '', data.words);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+
     const bulkTag = async (tag) => {
       if (!_selected.size) return;
       await Promise.all([..._selected].map(wid => api.post('/api/vocab/tag', { word_id: wid, tag, active: true }).catch(() => {})));
@@ -1048,9 +1491,12 @@ function renderWordList(content, book, filter, words) {
       await Promise.all([..._selected].map(wid =>
         fetch(`/api/wordbooks/${book.book_id}/words/${wid}`, { method: 'DELETE' }).catch(() => {})
       ));
-      _allWords = _allWords.filter(w => !_selected.has(w.word_id));
+      const data = await api.get(`/api/wordbooks/${book.book_id}/words`);
+      _currentBook = data.book;
+      renderBookStatsRow(content, data.book);
+      _allWords = data.words;
       _bulkMode = false; _selected.clear();
-      renderWordList(content, book, content.querySelector('#word-filter')?.value.trim() || '');
+      renderWordList(content, data.book, content.querySelector('#word-filter')?.value.trim() || '', data.words);
     });
   };
 
@@ -1061,133 +1507,68 @@ function renderWordList(content, book, filter, words) {
 
 function showAddWordPanel(content, book, el) {
   const panel = content.querySelector('#add-word-panel-book');
+  const prefix = 'book-add';
   panel.style.display = '';
   panel.innerHTML = `
     <div class="card" style="margin-top:16px;padding:24px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-        <h3 style="margin:0">Add Word to "${escHtml(book.name)}"</h3>
-        <button class="btn btn-outline" id="btn-close-add-book" style="font-size:12px;padding:4px 10px">✕ Close</button>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:8px">
-        <input id="add-word-input-book" type="text" placeholder="Search or type a word…" style="flex:1" autocomplete="off">
-        <button class="btn btn-outline" id="btn-ai-fill-book" style="white-space:nowrap">✨ AI Fill</button>
-      </div>
-      <div id="search-results-book" style="margin-bottom:8px"></div>
-      <div id="add-ai-status-book" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;min-height:16px"></div>
-      <div id="add-fields-book" style="display:none">
-        <div class="form-group"><label>Definition (English)</label><input id="add-def-en-book" type="text" placeholder="e.g. to examine carefully"></div>
-        <div class="form-group"><label>Definition (Chinese) <span style="color:var(--text-dim)">(optional)</span></label><input id="add-def-zh-book" type="text"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-          <div class="form-group"><label>Part of speech</label><input id="add-pos-book" type="text" placeholder="verb"></div>
-          <div class="form-group"><label>Pronunciation</label><input id="add-pron-book" type="text" placeholder="/ɪˈzæm.ɪn/"></div>
-        </div>
-        <div class="form-group"><label>Example sentence</label><input id="add-example-book" type="text"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-          <div class="form-group"><label>Synonyms</label><input id="add-synonyms-book" type="text"></div>
-          <div class="form-group"><label>Antonyms</label><input id="add-antonyms-book" type="text"></div>
-        </div>
-        <div id="add-msg-book" style="margin-bottom:8px"></div>
-        <button class="btn btn-success" id="btn-add-confirm-book" style="width:100%">+ Add to Book</button>
-      </div>
+      ${wordEditorMarkup(prefix, {
+        title: `Add Word to "${escHtml(book.name)}"`,
+        subtitle: 'Search existing vocabulary or create a fully editable card. Preview updates as you type or run AI Fill.',
+        primaryLabel: '+ Add to Book',
+        primaryClass: 'btn-success',
+        clearLabel: 'Clear',
+        closeLabel: 'Close',
+        showClose: true,
+      })}
     </div>`;
 
-  panel.querySelector('#btn-close-add-book').addEventListener('click', () => { panel.style.display = 'none'; });
-  const wordInput = panel.querySelector('#add-word-input-book');
-  const fieldsDiv = panel.querySelector('#add-fields-book');
-  const statusDiv = panel.querySelector('#add-ai-status-book');
-  const searchResults = panel.querySelector('#search-results-book');
-
-  wordInput.addEventListener('input', () => {
-    const q = wordInput.value.trim();
-    if (q) fieldsDiv.style.display = '';
-    clearTimeout(_searchTimeout);
-    if (q.length < 2) { searchResults.innerHTML = ''; return; }
-    _searchTimeout = setTimeout(() => searchVocab(q, searchResults, wordInput, panel), 300);
-  });
-
-  panel.querySelector('#btn-ai-fill-book').addEventListener('click', async () => {
-    const word = wordInput.value.trim();
-    if (!word) { wordInput.focus(); return; }
-    fieldsDiv.style.display = '';
-    const btn = panel.querySelector('#btn-ai-fill-book');
-    btn.disabled = true; statusDiv.textContent = '✨ Fetching AI enrichment…';
-    try {
-      const r = await api.post('/api/vocab/enrich', { word });
-      panel.querySelector('#add-def-en-book').value   = r.definition_en  || '';
-      panel.querySelector('#add-def-zh-book').value   = r.definition_zh  || '';
-      panel.querySelector('#add-pos-book').value      = r.part_of_speech || '';
-      panel.querySelector('#add-pron-book').value     = r.pronunciation  || '';
-      panel.querySelector('#add-example-book').value  = r.example        || '';
-      panel.querySelector('#add-synonyms-book').value = r.synonyms       || '';
-      panel.querySelector('#add-antonyms-book').value = r.antonyms       || '';
-      statusDiv.textContent = '✓ AI fill complete';
-      setTimeout(() => { statusDiv.textContent = ''; }, 2000);
-    } catch (e) { statusDiv.textContent = `AI unavailable: ${e.message}`; }
-    btn.disabled = false;
-  });
-
-  panel.querySelector('#btn-add-confirm-book').addEventListener('click', async () => {
-    const word = wordInput.value.trim();
-    const defEn = panel.querySelector('#add-def-en-book').value.trim();
-    const msg = panel.querySelector('#add-msg-book');
-    if (!word) { wordInput.focus(); return; }
-    if (!defEn) { msg.innerHTML = '<div class="alert alert-error" style="margin-bottom:8px">English definition is required</div>'; return; }
-    const btn = panel.querySelector('#btn-add-confirm-book');
-    btn.disabled = true;
-    try {
-      const existingWordId = wordInput.dataset.wordId || null;
-      const payload = existingWordId ? { word_id: existingWordId } : {
-        word, definition_en: defEn,
-        definition_zh: panel.querySelector('#add-def-zh-book').value.trim(),
-        part_of_speech: panel.querySelector('#add-pos-book').value.trim(),
-        pronunciation: panel.querySelector('#add-pron-book').value.trim(),
-        example: panel.querySelector('#add-example-book').value.trim(),
-        synonyms: panel.querySelector('#add-synonyms-book').value.trim(),
-        antonyms: panel.querySelector('#add-antonyms-book').value.trim(),
-      };
-      await api.post(`/api/wordbooks/${book.book_id}/words`, payload);
-      msg.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ "${escHtml(word)}" added!</div>`;
-      wordInput.value = ''; wordInput.dataset.wordId = '';
-      ['#add-def-en-book','#add-def-zh-book','#add-pos-book','#add-pron-book','#add-example-book','#add-synonyms-book','#add-antonyms-book'].forEach(id => { panel.querySelector(id).value = ''; });
-      fieldsDiv.style.display = 'none';
-      setTimeout(() => { msg.innerHTML = ''; }, 2500);
-      const data = await api.get(`/api/wordbooks/${book.book_id}/words`);
-      renderWordList(content, book, '', data.words);
-    } catch (e) { msg.innerHTML = `<div class="alert alert-error" style="margin-bottom:8px">${e.message}</div>`; }
-    btn.disabled = false;
-  });
-  wordInput.focus();
-}
-
-async function searchVocab(q, resultsEl, wordInput, panel) {
-  try {
-    const results = await api.get(`/api/wordbooks/search/vocab?q=${encodeURIComponent(q)}&limit=6`);
-    if (!results.length) { resultsEl.innerHTML = ''; return; }
-    resultsEl.innerHTML = `<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:8px">
-      ${results.map(r => `<div class="search-result-row" data-word-id="${r.word_id}" data-word="${escHtml(r.word)}"
-        style="padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
-        <div style="flex:1"><span style="font-weight:600">${escHtml(r.word)}</span>
-          ${r.part_of_speech ? `<span style="font-size:11px;color:var(--text-dim);margin-left:6px">${escHtml(r.part_of_speech)}</span>` : ''}
-          <div style="font-size:12px;color:var(--text-dim)">${escHtml(r.definition_en || '')}</div>
-        </div></div>`).join('')}
-    </div>`;
-    resultsEl.querySelectorAll('.search-result-row').forEach(row => {
-      row.addEventListener('mouseenter', () => row.style.background = 'var(--bg3)');
-      row.addEventListener('mouseleave', () => row.style.background = '');
-      row.addEventListener('click', () => {
-        wordInput.value = row.dataset.word;
-        wordInput.dataset.wordId = row.dataset.wordId;
-        resultsEl.innerHTML = '';
-        panel.querySelector('#add-fields-book').style.display = '';
-        const match = results.find(r => r.word_id === row.dataset.wordId);
-        if (match) {
-          panel.querySelector('#add-def-en-book').value = match.definition_en || '';
-          panel.querySelector('#add-def-zh-book').value = match.definition_zh || '';
-          panel.querySelector('#add-pos-book').value = match.part_of_speech || '';
+  bindWordEditor(panel, prefix, {
+    searchEnabled: true,
+    onClose: () => { panel.style.display = 'none'; },
+    onClear: () => {
+      resetWordEditor(panel, prefix);
+      setWordEditorStatus(panel, prefix, 'Draft cleared.', 'muted');
+    },
+    onSubmit: async () => {
+      const nodes = getWordEditorNodes(panel, prefix);
+      const draft = collectWordEditorDraft(panel, prefix);
+      if (!draft.word) {
+        nodes.wordInput?.focus();
+        return;
+      }
+      if (!draft.definition_en && !draft.word_id) {
+        nodes.message.innerHTML = '<div class="alert alert-error" style="margin-bottom:8px">English definition is required for a brand-new word.</div>';
+        return;
+      }
+      nodes.submit.disabled = true;
+      try {
+        const result = await api.post(`/api/wordbooks/${book.book_id}/words`, buildWordSavePayload(draft, true));
+        const bookName = escHtml(book.name);
+        if (result.already_exists) {
+          if (result.updated_existing) {
+            nodes.message.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ Updated "${escHtml(draft.word)}" and kept it in ${bookName}.</div>`;
+          } else {
+            nodes.message.innerHTML = `<div class="alert alert-warn" style="margin-bottom:8px">"${escHtml(draft.word)}" is already in ${bookName}.</div>`;
+          }
+        } else {
+          const reused = result.updated_existing ? ' and refreshed its card content' : '';
+          nodes.message.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ "${escHtml(draft.word)}" added to ${bookName}${reused}.</div>`;
+          resetWordEditor(panel, prefix);
+          setWordEditorStatus(panel, prefix, 'Ready for the next word.', 'muted');
         }
-      });
-    });
-  } catch { resultsEl.innerHTML = ''; }
+        const data = await api.get(`/api/wordbooks/${book.book_id}/words`);
+        _currentBook = data.book;
+        renderBookStatsRow(content, data.book);
+        renderWordList(content, data.book, content.querySelector('#word-filter')?.value.trim() || '', data.words);
+      } catch (e) {
+        nodes.message.innerHTML = `<div class="alert alert-error" style="margin-bottom:8px">${e.message}</div>`;
+      }
+      nodes.submit.disabled = false;
+    },
+  });
+
+  resetWordEditor(panel, prefix);
+  getWordEditorNodes(panel, prefix).wordInput?.focus();
 }
 
 // ── Book Study Session ────────────────────────────────────────────
@@ -1354,6 +1735,7 @@ async function rateBookCard(el, content, sessionBody, quality, book) {
 // ── ADD WORD TAB ──────────────────────────────────────────────────
 
 async function renderAddTab(el, content) {
+  const addPrefix = 'quick-add';
   let books = [];
   try { books = await api.get('/api/wordbooks'); } catch {}
   books = books.filter(b => !b.is_builtin);
@@ -1443,42 +1825,35 @@ async function renderAddTab(el, content) {
         <div id="import-result" style="margin-top:12px"></div>
       </div>
 
-      <div style="padding:0">
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <input id="add-word-input" type="text" placeholder="Enter a word…" style="flex:1;font-size:15px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px">
-          <button class="btn btn-outline" id="btn-ai-fill" style="white-space:nowrap">✨ AI Fill</button>
-        </div>
-        <div id="add-ai-status" style="font-size:12px;color:var(--text-dim);margin-bottom:8px;min-height:16px"></div>
-        <div id="add-fields" style="display:none">
-          <div class="form-group"><label>Definition (English)</label>
-            <input id="add-def-en" type="text" placeholder="e.g. to make something better">
-          </div>
-          <div class="form-group"><label>Definition (Chinese) <span style="color:var(--text-dim)">(optional)</span></label>
-            <input id="add-def-zh" type="text" placeholder="e.g. 改善">
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div class="form-group"><label>Part of speech</label><input id="add-pos" type="text" placeholder="verb"></div>
-            <div class="form-group"><label>Pronunciation</label><input id="add-pron" type="text" placeholder="/ɪmˈpruːv/"></div>
-          </div>
-          <div class="form-group"><label>Example sentence</label>
-            <input id="add-example" type="text" placeholder="e.g. She worked hard to improve her score.">
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-            <div class="form-group"><label>Synonyms <span style="color:var(--text-dim)">(opt)</span></label><input id="add-synonyms" type="text" placeholder="enhance, boost"></div>
-            <div class="form-group"><label>Antonyms <span style="color:var(--text-dim)">(opt)</span></label><input id="add-antonyms" type="text" placeholder="worsen"></div>
-          </div>
-          <div id="add-msg" style="margin-bottom:8px"></div>
-          <button class="btn btn-success" id="btn-add-confirm" style="width:100%;font-size:15px;padding:10px">+ Add Word</button>
-        </div>
+      <div class="card" style="padding:20px;margin-bottom:0">
+        ${wordEditorMarkup(addPrefix, {
+          title: 'Add or Update a Word Card',
+          subtitle: 'Search your library, refine the content, and save it directly to the SRS deck or a selected custom book.',
+          primaryLabel: '+ Add Word',
+          primaryClass: 'btn-success',
+          clearLabel: 'Clear',
+          showClose: false,
+        })}
       </div>
     </div>
   `;
 
   const hintEl = content.querySelector('#book-sel-hint');
+  const syncAddActionLabel = () => {
+    const nodes = getWordEditorNodes(content, addPrefix);
+    if (nodes.submit) {
+      nodes.submit.textContent = selectedBookId ? '+ Save to Book' : '+ Add to Deck';
+    }
+  };
   const updateHint = () => {
-    if (!selectedBookId) { hintEl.textContent = 'Word will be added to your SRS deck only.'; return; }
+    if (!selectedBookId) {
+      hintEl.textContent = 'Word will be added to your SRS deck only.';
+      syncAddActionLabel();
+      return;
+    }
     const b = books.find(b => b.book_id === selectedBookId);
     hintEl.textContent = b ? `Adding to: ${b.icon} ${b.name}` : '';
+    syncAddActionLabel();
   };
   updateHint();
 
@@ -1500,9 +1875,6 @@ async function renderAddTab(el, content) {
     });
   });
 
-  const wordInput = content.querySelector('#add-word-input');
-  const fieldsDiv = content.querySelector('#add-fields');
-  const statusDiv = content.querySelector('#add-ai-status');
   const importTarget = content.querySelector('#import-target');
   const importNameWrap = content.querySelector('#import-name-wrap');
   const importResult = content.querySelector('#import-result');
@@ -1512,10 +1884,6 @@ async function renderAddTab(el, content) {
   };
   importTarget.addEventListener('change', updateImportTarget);
   updateImportTarget();
-
-  wordInput.addEventListener('input', () => {
-    if (wordInput.value.trim()) fieldsDiv.style.display = '';
-  });
 
   content.querySelector('#btn-import-validate').addEventListener('click', async () => {
     const payload = content.querySelector('#import-payload').value.trim();
@@ -1566,61 +1934,62 @@ async function renderAddTab(el, content) {
     btn.disabled = false;
   });
 
-  content.querySelector('#btn-ai-fill').addEventListener('click', async () => {
-    const word = wordInput.value.trim();
-    if (!word) { wordInput.focus(); return; }
-    fieldsDiv.style.display = '';
-    const btn = content.querySelector('#btn-ai-fill');
-    btn.disabled = true; statusDiv.textContent = '✨ Fetching AI enrichment…';
-    try {
-      const r = await api.post('/api/vocab/enrich', { word });
-      content.querySelector('#add-def-en').value   = r.definition_en  || '';
-      content.querySelector('#add-def-zh').value   = r.definition_zh  || '';
-      content.querySelector('#add-pos').value      = r.part_of_speech || '';
-      content.querySelector('#add-pron').value     = r.pronunciation  || '';
-      content.querySelector('#add-example').value  = r.example        || '';
-      content.querySelector('#add-synonyms').value = r.synonyms       || '';
-      content.querySelector('#add-antonyms').value = r.antonyms       || '';
-      statusDiv.textContent = '✓ AI fill complete';
-      setTimeout(() => { statusDiv.textContent = ''; }, 2000);
-    } catch (e) { statusDiv.textContent = `AI unavailable: ${e.message}`; }
-    btn.disabled = false;
+  bindWordEditor(content, addPrefix, {
+    searchEnabled: true,
+    onClear: () => {
+      resetWordEditor(content, addPrefix);
+      setWordEditorStatus(content, addPrefix, 'Draft cleared.', 'muted');
+    },
+    onSubmit: async () => {
+      const nodes = getWordEditorNodes(content, addPrefix);
+      const draft = collectWordEditorDraft(content, addPrefix);
+      if (!draft.word) {
+        nodes.wordInput?.focus();
+        return;
+      }
+      if (!draft.definition_en && !draft.word_id) {
+        nodes.message.innerHTML = '<div class="alert alert-error" style="margin-bottom:8px">English definition is required for a brand-new word.</div>';
+        return;
+      }
+      nodes.submit.disabled = true;
+      try {
+        if (selectedBookId) {
+          const book = books.find(item => item.book_id === selectedBookId);
+          const result = await api.post(`/api/wordbooks/${selectedBookId}/words`, buildWordSavePayload(draft, true));
+          if (result.already_exists) {
+            if (result.updated_existing) {
+              nodes.message.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ Updated "${escHtml(draft.word)}" inside ${escHtml(book?.name || 'the selected book')}.</div>`;
+            } else {
+              nodes.message.innerHTML = `<div class="alert alert-warn" style="margin-bottom:8px">"${escHtml(draft.word)}" is already in ${escHtml(book?.name || 'the selected book')}.</div>`;
+            }
+          } else {
+            nodes.message.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ "${escHtml(draft.word)}" saved to ${escHtml(book?.name || 'the selected book')}.</div>`;
+            resetWordEditor(content, addPrefix);
+            setWordEditorStatus(content, addPrefix, 'Saved to the selected book and your SRS deck.', 'success');
+          }
+        } else {
+          const result = await api.post('/api/vocab/add', buildWordSavePayload(draft, false));
+          if (result.already_exists) {
+            if (result.updated_existing) {
+              nodes.message.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ Updated "${escHtml(draft.word)}" in your deck.</div>`;
+            } else {
+              nodes.message.innerHTML = `<div class="alert alert-warn" style="margin-bottom:8px">"${escHtml(draft.word)}" is already in your deck.</div>`;
+            }
+          } else {
+            const reused = result.reused_existing ? ' and re-used the existing card' : '';
+            nodes.message.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ "${escHtml(draft.word)}" added to your deck${reused}.</div>`;
+            resetWordEditor(content, addPrefix);
+            setWordEditorStatus(content, addPrefix, 'Saved to your SRS deck.', 'success');
+          }
+        }
+      } catch (e) {
+        nodes.message.innerHTML = `<div class="alert alert-error" style="margin-bottom:8px">${e.message}</div>`;
+      }
+      nodes.submit.disabled = false;
+    },
   });
 
-  content.querySelector('#btn-add-confirm').addEventListener('click', async () => {
-    const word = wordInput.value.trim();
-    const defEn = content.querySelector('#add-def-en').value.trim();
-    const msg = content.querySelector('#add-msg');
-    if (!word) { wordInput.focus(); return; }
-    if (!defEn) { msg.innerHTML = '<div class="alert alert-error" style="margin-bottom:8px">English definition is required</div>'; return; }
-    const btn = content.querySelector('#btn-add-confirm');
-    btn.disabled = true;
-    try {
-      const r = await api.post('/api/vocab/add', {
-        word, definition_en: defEn,
-        definition_zh:  content.querySelector('#add-def-zh').value.trim(),
-        part_of_speech: content.querySelector('#add-pos').value.trim(),
-        pronunciation:  content.querySelector('#add-pron').value.trim(),
-        example:        content.querySelector('#add-example').value.trim(),
-        synonyms:       content.querySelector('#add-synonyms').value.trim(),
-        antonyms:       content.querySelector('#add-antonyms').value.trim(),
-      });
-      if (selectedBookId && r.ok && r.word_id) {
-        try { await api.post(`/api/wordbooks/${selectedBookId}/words`, { word_id: r.word_id }); } catch {}
-      }
-      if (r.already_exists) {
-        msg.innerHTML = `<div class="alert alert-warn" style="margin-bottom:8px">"${escHtml(r.word)}" is already in your deck</div>`;
-      } else {
-        const bookName = selectedBookId ? (books.find(b => b.book_id === selectedBookId)?.name || '') : '';
-        msg.innerHTML = `<div class="alert alert-success" style="margin-bottom:8px">✓ "${escHtml(r.word)}" added${bookName ? ` → ${escHtml(bookName)}` : ''}!</div>`;
-        wordInput.value = '';
-        ['#add-def-en','#add-def-zh','#add-pos','#add-pron','#add-example','#add-synonyms','#add-antonyms'].forEach(id => { content.querySelector(id).value = ''; });
-        fieldsDiv.style.display = 'none';
-        setTimeout(() => { msg.innerHTML = ''; }, 2500);
-      }
-    } catch (e) { msg.innerHTML = `<div class="alert alert-error" style="margin-bottom:8px">${e.message}</div>`; }
-    btn.disabled = false;
-  });
-
-  wordInput.focus();
+  resetWordEditor(content, addPrefix);
+  syncAddActionLabel();
+  getWordEditorNodes(content, addPrefix).wordInput?.focus();
 }

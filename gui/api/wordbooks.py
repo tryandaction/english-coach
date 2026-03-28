@@ -7,7 +7,15 @@ from pydantic import BaseModel
 
 from core.vocab.catalog import merge_word_payload, normalize_exam_type, parse_import_payload
 from gui.deps import get_components
-from gui.api.vocab import _card_to_dict, _derive_subject, _get_word_source, _lookup_existing_word, VocabSession, _sessions
+from gui.api.vocab import (
+    _card_to_dict,
+    _derive_subject,
+    _extract_word_updates,
+    _get_word_source,
+    _lookup_existing_word,
+    VocabSession,
+    _sessions,
+)
 
 import time
 import uuid
@@ -37,6 +45,20 @@ class AddWordRequest(BaseModel):
     word_id: Optional[str] = None   # existing vocab word_id
     # OR create new word inline
     word: Optional[str] = None
+    definition_en: str = ""
+    definition_zh: str = ""
+    example: str = ""
+    part_of_speech: str = ""
+    pronunciation: str = ""
+    synonyms: str = ""
+    antonyms: str = ""
+    derivatives: str = ""
+    collocations: str = ""
+    context_sentence: str = ""
+
+
+class UpdateWordRequest(BaseModel):
+    word: str
     definition_en: str = ""
     definition_zh: str = ""
     example: str = ""
@@ -185,20 +207,29 @@ def add_word(book_id: str, req: AddWordRequest):
         raise HTTPException(404, "Word book not found")
     if int(book.get("is_builtin") or 0):
         raise HTTPException(403, "Built-in word books are read-only")
+    requested_updates = _extract_word_updates(req, include_word=False, allow_blank=False)
 
     if req.word_id:
         # Add existing vocab word
         word_id = req.word_id
         # Verify it exists
-        row = srs._db.execute("SELECT word FROM vocabulary WHERE word_id=?", (word_id,)).fetchone()
+        row = srs._db.execute("SELECT * FROM vocabulary WHERE word_id=?", (word_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Word not found in vocabulary")
         word = row["word"]
+        if requested_updates:
+            srs.update_word_fields(word_id, **requested_updates)
 
         # Check if word already exists in this book
         existing_id = srs.check_word_in_book(book_id, word)
         if existing_id:
-            return {"ok": True, "word_id": existing_id, "word": word, "already_exists": True}
+            return {
+                "ok": True,
+                "word_id": existing_id,
+                "word": word,
+                "already_exists": True,
+                "updated_existing": bool(requested_updates),
+            }
     elif req.word:
         # Check if word already exists in this book
         word = req.word.strip().lower()
@@ -207,30 +238,51 @@ def add_word(book_id: str, req: AddWordRequest):
 
         existing_id = srs.check_word_in_book(book_id, word)
         if existing_id:
-            return {"ok": True, "word_id": existing_id, "word": word, "already_exists": True}
+            if requested_updates:
+                srs.update_word_fields(existing_id, **requested_updates)
+            return {
+                "ok": True,
+                "word_id": existing_id,
+                "word": word,
+                "already_exists": True,
+                "updated_existing": bool(requested_updates),
+            }
 
-        # Create new word and add
-        word_id = srs.add_word(
-            word=word,
-            definition_en=req.definition_en,
-            definition_zh=req.definition_zh,
-            example=req.example,
-            source="user",
-            part_of_speech=req.part_of_speech,
-            pronunciation=req.pronunciation,
-            synonyms=req.synonyms,
-            antonyms=req.antonyms,
-            derivatives=req.derivatives,
-            collocations=req.collocations,
-            context_sentence=req.context_sentence,
-        )
+        existing = _lookup_existing_word(srs, word)
+        if existing:
+            word_id = existing["word_id"]
+            if requested_updates:
+                srs.update_word_fields(word_id, **requested_updates)
+
+        else:
+            # Create new word and add
+            word_id = srs.add_word(
+                word=word,
+                definition_en=req.definition_en,
+                definition_zh=req.definition_zh,
+                example=req.example,
+                source="user",
+                part_of_speech=req.part_of_speech,
+                pronunciation=req.pronunciation,
+                synonyms=req.synonyms,
+                antonyms=req.antonyms,
+                derivatives=req.derivatives,
+                collocations=req.collocations,
+                context_sentence=req.context_sentence,
+            )
     else:
         raise HTTPException(400, "Provide word_id or word")
 
     # Enroll in SRS if not already
     srs.enroll_words(profile.user_id, [word_id])
     srs.add_word_to_book(book_id, word_id)
-    return {"ok": True, "word_id": word_id, "word": word, "already_exists": False}
+    return {
+        "ok": True,
+        "word_id": word_id,
+        "word": word,
+        "already_exists": False,
+        "updated_existing": bool(requested_updates),
+    }
 
 
 @router.delete("/{book_id}/words/{word_id}")
@@ -245,6 +297,34 @@ def remove_word(book_id: str, word_id: str):
         raise HTTPException(403, "Built-in word books are read-only")
     srs.remove_word_from_book(book_id, word_id)
     return {"ok": True}
+
+
+@router.put("/{book_id}/words/{word_id}")
+def update_word(book_id: str, word_id: str, req: UpdateWordRequest):
+    kb, srs, user_model, ai, profile = get_components()
+    if not profile:
+        raise HTTPException(400, "No profile")
+    book = srs.get_word_book(book_id, profile.user_id)
+    if not book:
+        raise HTTPException(404, "Word book not found")
+    membership = srs._db.execute(
+        "SELECT 1 FROM word_book_words WHERE book_id=? AND word_id=?",
+        (book_id, word_id),
+    ).fetchone()
+    if not membership:
+        raise HTTPException(404, "Word not found in word book")
+
+    updates = _extract_word_updates(req, include_word=True, allow_blank=True)
+    if not updates.get("word"):
+        raise HTTPException(400, "Word is required")
+    try:
+        srs.update_word_fields(word_id, **updates)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    row = srs._db.execute("SELECT * FROM vocabulary WHERE word_id=?", (word_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Word not found")
+    return dict(row)
 
 
 @router.post("/import/validate")

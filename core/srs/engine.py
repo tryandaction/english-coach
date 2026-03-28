@@ -14,6 +14,8 @@ from typing import Optional
 
 from core.memory.service import LearnerMemoryService
 from core.memory.store import ensure_memory_schema
+from core.sqlite_runtime import connect_user_db
+from core.vocab.catalog import normalize_word
 
 
 @dataclass
@@ -53,8 +55,7 @@ class SM2Engine:
     """
 
     def __init__(self, db_path: str | Path):
-        self._db = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._db = connect_user_db(db_path)
         self._init_schema()
         ensure_memory_schema(self._db)
 
@@ -275,15 +276,25 @@ class SM2Engine:
         allowed = {"definition_en", "definition_zh", "example", "synonyms", "antonyms",
                    "derivatives", "collocations", "context_sentence", "part_of_speech",
                    "pronunciation", "enriched", "level", "frequency", "category", "difficulty",
-                   "difficulty_score", "exam_type", "subject_domain", "word_family", "usage_notes"}
+                   "difficulty_score", "exam_type", "subject_domain", "word_family", "usage_notes",
+                   "word"}
         updates = {k: v for k, v in fields.items() if k in allowed}
+        if "word" in updates:
+            normalized = normalize_word(str(updates["word"]))
+            if normalized:
+                updates["word"] = normalized
+            else:
+                del updates["word"]
         if not updates:
             return
         sets = ", ".join(f"{k}=?" for k in updates)
-        self._db.execute(
-            f"UPDATE vocabulary SET {sets} WHERE word_id=?",
-            list(updates.values()) + [word_id],
-        )
+        try:
+            self._db.execute(
+                f"UPDATE vocabulary SET {sets} WHERE word_id=?",
+                list(updates.values()) + [word_id],
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Word already exists") from exc
         self._db.commit()
 
     def enroll_words(self, user_id: str, word_ids: list[str]) -> int:
@@ -672,7 +683,9 @@ class SM2Engine:
     def search_vocabulary(self, query: str, limit: int = 20) -> list[dict]:
         q = f"%{query.lower()}%"
         rows = self._db.execute(
-            """SELECT word_id, word, definition_en, definition_zh, part_of_speech, source
+            """SELECT word_id, word, definition_en, definition_zh, example,
+                      synonyms, antonyms, derivatives, collocations, context_sentence,
+                      part_of_speech, pronunciation, source
                FROM vocabulary
                WHERE LOWER(word) LIKE ? OR LOWER(definition_en) LIKE ?
                ORDER BY CASE WHEN LOWER(word) = ? THEN 0

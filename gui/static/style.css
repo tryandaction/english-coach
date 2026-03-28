@@ -579,6 +579,122 @@ p  { color: var(--text-dim); font-size: 14px; line-height: 1.6; margin-bottom: 1
   background: rgba(0,0,0,0.4);
 }
 
+/* ── Vocabulary Editor ── */
+.vocab-editor-shell { display: flex; flex-direction: column; gap: 14px; }
+.vocab-editor-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.vocab-editor-title { font-size: 18px; font-weight: 700; }
+.vocab-editor-subtitle { font-size: 12px; color: var(--text-dim); margin-top: 4px; line-height: 1.6; }
+.vocab-editor-toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+.vocab-editor-toolbar input {
+  flex: 1; min-width: 220px;
+  background: var(--bg3); border-color: var(--border);
+}
+.vocab-editor-search-results { min-height: 0; }
+.vocab-editor-search-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(79, 142, 247, 0.05);
+}
+.vocab-editor-search-row {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px;
+  border: none; border-bottom: 1px solid var(--border);
+  background: transparent; color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.vocab-editor-search-row:last-child { border-bottom: none; }
+.vocab-editor-search-row:hover { background: var(--bg3); }
+.vocab-editor-status {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.vocab-editor-status[data-tone="success"] { color: var(--green); }
+.vocab-editor-status[data-tone="error"] { color: var(--red); }
+.vocab-editor-status[data-tone="info"] { color: var(--accent); }
+.vocab-editor-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.vocab-editor-form {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 18px;
+}
+.vocab-editor-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.vocab-editor-preview-card {
+  height: 100%;
+  background:
+    radial-gradient(circle at top right, rgba(79, 142, 247, 0.22), transparent 34%),
+    linear-gradient(160deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+  border: 1px solid rgba(79, 142, 247, 0.35);
+  border-radius: 18px;
+  padding: 18px;
+  box-shadow: var(--shadow);
+}
+.vocab-editor-preview-head {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.vocab-editor-preview-word {
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.vocab-editor-preview-meta {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+.vocab-editor-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.vocab-editor-preview-block {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(15, 17, 23, 0.32);
+  border: 1px solid rgba(255,255,255,0.04);
+  line-height: 1.6;
+}
+.vocab-editor-preview-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.vocab-editor-preview-empty {
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255,255,255,0.08);
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.vocab-editor-preview-tags {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin-top: 14px;
+}
+.vocab-editor-actions {
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+
 /* ── Mobile Responsive Breakpoints ── */
 @media (max-width: 768px) {
   /* Show mobile nav, hide sidebar */
@@ -654,6 +770,13 @@ p  { color: var(--text-dim); font-size: 14px; line-height: 1.6; margin-bottom: 1
 
   /* Add word book selector grid */
   #book-selector { grid-template-columns: repeat(2, 1fr) !important; }
+
+  .vocab-editor-toolbar { flex-direction: column; }
+  .vocab-editor-toolbar input { min-width: 0; width: 100%; }
+  .vocab-editor-grid,
+  .vocab-editor-field-grid { grid-template-columns: 1fr; }
+  .vocab-editor-form,
+  .vocab-editor-preview-card { padding: 14px; }
 }
 
 @media (max-width: 480px) {
