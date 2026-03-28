@@ -306,31 +306,31 @@ function wordEditorMarkup(prefix, options = {}) {
       <div class="vocab-editor-grid">
         <div id="${prefix}-preview"></div>
         <div class="vocab-editor-form">
-          <div class="form-group">
+          <div class="form-group vocab-editor-span-2">
             <label>Definition (English)</label>
             <textarea id="${prefix}-def-en" rows="2" placeholder="e.g. to speak for a long time in a formal way"></textarea>
           </div>
-          <div class="form-group">
+          <div class="form-group vocab-editor-span-2">
             <label>Definition (Chinese) <span style="color:var(--text-dim)">(optional)</span></label>
             <textarea id="${prefix}-def-zh" rows="2" placeholder="例如：正式发表长篇讲话"></textarea>
           </div>
-          <div class="vocab-editor-field-grid">
+          <div class="vocab-editor-inline-grid vocab-editor-inline-grid-wide">
             <div class="form-group"><label>Part of speech</label><input id="${prefix}-pos" type="text" placeholder="verb"></div>
             <div class="form-group"><label>Pronunciation</label><input id="${prefix}-pron" type="text" placeholder="/pɒnˈtɪf.ɪ.keɪt/"></div>
           </div>
-          <div class="form-group">
+          <div class="form-group vocab-editor-span-2">
             <label>Example sentence</label>
             <textarea id="${prefix}-example" rows="3" placeholder="e.g. He began to pontificate about politics at dinner."></textarea>
           </div>
-          <div class="vocab-editor-field-grid">
+          <div class="vocab-editor-inline-grid">
             <div class="form-group"><label>Synonyms</label><input id="${prefix}-synonyms" type="text" placeholder="lecture, sermonize"></div>
             <div class="form-group"><label>Antonyms</label><input id="${prefix}-antonyms" type="text" placeholder="listen, defer"></div>
           </div>
-          <div class="vocab-editor-field-grid">
+          <div class="vocab-editor-inline-grid vocab-editor-inline-grid-colloc">
             <div class="form-group"><label>Collocations</label><input id="${prefix}-collocations" type="text" placeholder="pontificate on politics"></div>
             <div class="form-group"><label>Derivatives</label><input id="${prefix}-derivatives" type="text" placeholder="pontification"></div>
           </div>
-          <div class="form-group">
+          <div class="form-group vocab-editor-span-2">
             <label>Context sentence</label>
             <textarea id="${prefix}-context" rows="2" placeholder="Add a usage note or scenario for this card."></textarea>
           </div>
