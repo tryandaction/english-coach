@@ -110,6 +110,8 @@ function renderSetupRequired(el, runtime) {
 function renderDashboard(el, data, runtime, coach) {
   const coachPlan = coach.plan || { tasks: [], summary: {} };
   const coachSummary = coach.coach_summary || data.coach_summary || {};
+  const memorySummary = data.memory_summary || {};
+  const actionCandidates = coach.action_candidates || coachSummary.action_candidates || [];
   const counts = data.mode_counts || {};
   const streak = data.streak_days || 0;
   const exam = (data.target_exam || 'general').toUpperCase();
@@ -125,6 +127,7 @@ function renderDashboard(el, data, runtime, coach) {
 
   el.innerHTML = `
     <h1>欢迎回来${data.name ? `，${escHtml(data.name)}` : ''}</h1>
+    ${renderWarnings(data.warning_codes || [], coach.warning_codes || [], { coachSummary, memorySummary })}
     <p style="margin-bottom:18px">
       CEFR <span class="tag">${escHtml(data.cefr_level || '?')}</span>
       &nbsp;·&nbsp; 目标考试 <span class="tag">${escHtml(exam)}</span>
@@ -162,6 +165,7 @@ function renderDashboard(el, data, runtime, coach) {
       <div class="stat-badge"><div class="val">${data.avg_accuracy ?? 0}%</div><div class="lbl">平均正确率</div></div>
     </div>
 
+    ${renderMemoryAndActions(memorySummary, actionCandidates)}
     ${renderCoachPanel(coachPlan, coach, data)}
     ${renderExamProgress(data)}
     ${renderRecentActivity(data.recent_sessions || [])}
@@ -186,6 +190,74 @@ function renderDashboard(el, data, runtime, coach) {
   el.querySelectorAll('.mode-card[data-page]').forEach(card => {
     card.addEventListener('click', () => navigate(card.dataset.page));
   });
+}
+
+function hasCoachSummaryData(summary) {
+  if (!summary || typeof summary !== 'object') return false;
+  return !!(
+    summary.today_result_card ||
+    summary.today_improved_point ||
+    summary.tomorrow_reason ||
+    summary.plan_stage ||
+    (Array.isArray(summary.action_candidates) && summary.action_candidates.length) ||
+    typeof summary.review_due_today === 'number'
+  );
+}
+
+function hasMemorySummaryData(summary) {
+  if (!summary || typeof summary !== 'object') return false;
+  return !!(
+    typeof summary.review_due_count === 'number' ||
+    typeof summary.facts_count === 'number' ||
+    typeof summary.known_words === 'number'
+  );
+}
+
+function renderWarnings(progressWarnings, coachWarnings, availability = {}) {
+  let warnings = [...new Set([...(progressWarnings || []), ...(coachWarnings || [])])];
+  if (hasCoachSummaryData(availability.coachSummary)) {
+    warnings = warnings.filter(item => item !== 'coach_summary_unavailable');
+  }
+  if (hasMemorySummaryData(availability.memorySummary)) {
+    warnings = warnings.filter(item => item !== 'memory_summary_unavailable');
+  }
+  if (!warnings.length) return '';
+  return `
+    <div class="alert alert-warn" style="margin-bottom:14px">
+      当前部分教练数据已降级显示：${warnings.map(item => escHtml(item)).join(' / ')}
+    </div>
+  `;
+}
+
+function renderMemoryAndActions(memorySummary, actionCandidates) {
+  return `
+    <div class="card" style="margin:18px 0 24px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">
+        <div class="card" style="background:var(--bg2);padding:16px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">长期记忆摘要</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+            <span class="tag">Facts ${memorySummary.facts_count || 0}</span>
+            <span class="tag">待复习 ${memorySummary.review_due_count || 0}</span>
+            <span class="tag">高错词 ${memorySummary.frequent_forgetting_count || 0}</span>
+          </div>
+          <div style="font-size:13px;color:var(--text-dim);line-height:1.6">
+            已知 ${memorySummary.known_words || 0} · 犹豫 ${memorySummary.unsure_words || 0} · 未掌握 ${memorySummary.unknown_words || 0}
+          </div>
+        </div>
+        <div class="card" style="background:var(--bg2);padding:16px">
+          <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">候选下一步</div>
+          ${(actionCandidates || []).length
+            ? actionCandidates.slice(0, 3).map(item => `
+                <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+                  <div style="font-size:13px;font-weight:600">${escHtml(item.title)}</div>
+                  <div style="font-size:12px;color:var(--text-dim);line-height:1.5">${escHtml(item.reason || '')}</div>
+                </div>
+              `).join('')
+            : '<div style="font-size:13px;color:var(--text-dim)">当前没有额外候选动作。</div>'}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderCoachPanel(plan, coach, data) {

@@ -7,16 +7,18 @@ export async function render(el) {
   `;
 
   try {
-    const [data, coach] = await Promise.all([
+    const [data, coach, memory, recommendation] = await Promise.all([
       api.get('/api/progress'),
       api.get('/api/coach/status').catch(() => ({})),
+      api.get('/api/memory/status').catch(() => ({})),
+      api.get('/api/practice/recommendation').catch(() => ({})),
     ]);
     if (window._currentAbortSignal?.aborted || !el.isConnected) return;
     if (!data.has_profile || data.error === 'no_profile') {
       renderEmptyState(el);
       return;
     }
-    renderDashboard(el, data, coach);
+    renderDashboard(el, data, coach, memory, recommendation);
   } catch (e) {
     if (e.name === 'AbortError' || !el.isConnected) return;
     const body = el.querySelector('#progress-body');
@@ -43,13 +45,18 @@ function renderEmptyState(el) {
   body.querySelector('#btn-progress-home')?.addEventListener('click', () => navigate('home'));
 }
 
-function renderDashboard(el, d, coach) {
+function renderDashboard(el, d, coach, memory, recommendation) {
   const body = el.querySelector('#progress-body');
   const coachSummary = d.coach_summary || coach.coach_summary || {};
+  const actionCandidates = recommendation.action_candidates || coach.action_candidates || [];
   const today = d.today_summary || { sessions: 0, minutes: 0, items: 0 };
   const weakAreas = d.weak_areas || [];
+  const visibleWarnings = resolveProgressWarnings(d.warning_codes || [], coach.warning_codes || [], coachSummary, memory.summary || {});
 
   body.innerHTML = `
+    ${visibleWarnings.length
+      ? `<div class="alert alert-warn" style="margin-bottom:16px">部分进度/教练数据已降级显示：${visibleWarnings.map(item => escHtml(item)).join(' / ')}</div>`
+      : ''}
     <div class="stats-row">
       <div class="stat-badge"><div class="val">${d.cefr_level || '?'}</div><div class="lbl">当前 CEFR</div></div>
       <div class="stat-badge"><div class="val">${d.streak_days ? `🔥 ${d.streak_days}` : '0'}</div><div class="lbl">连续天数</div></div>
@@ -111,7 +118,12 @@ function renderDashboard(el, d, coach) {
 
     <div class="card" style="margin-bottom:20px">
       <h3 style="margin-bottom:8px">下一步建议</h3>
-      ${renderRecommendations(d, coachSummary, weakAreas)}
+      ${renderRecommendations(d, coachSummary, weakAreas, actionCandidates)}
+    </div>
+
+    <div class="card" style="margin-bottom:20px">
+      <h3 style="margin-bottom:8px">长期记忆与复习池</h3>
+      ${renderMemoryPanel(memory)}
     </div>
 
     <div class="card" style="margin-bottom:20px">
@@ -132,6 +144,28 @@ function renderDashboard(el, d, coach) {
   body.querySelectorAll('.progress-next[data-page]').forEach(btn => {
     btn.addEventListener('click', () => navigate(btn.dataset.page));
   });
+}
+
+function resolveProgressWarnings(progressWarnings, coachWarnings, coachSummary, memorySummary) {
+  let warnings = [...new Set([...(progressWarnings || []), ...(coachWarnings || [])])];
+  if (coachSummary && typeof coachSummary === 'object' && (
+    coachSummary.today_result_card ||
+    coachSummary.today_improved_point ||
+    coachSummary.tomorrow_reason ||
+    coachSummary.plan_stage ||
+    (Array.isArray(coachSummary.action_candidates) && coachSummary.action_candidates.length) ||
+    typeof coachSummary.review_due_today === 'number'
+  )) {
+    warnings = warnings.filter(item => item !== 'coach_summary_unavailable');
+  }
+  if (memorySummary && typeof memorySummary === 'object' && (
+    typeof memorySummary.review_due_count === 'number' ||
+    typeof memorySummary.facts_count === 'number' ||
+    typeof memorySummary.known_words === 'number'
+  )) {
+    warnings = warnings.filter(item => item !== 'memory_summary_unavailable');
+  }
+  return warnings;
 }
 
 function renderCharts(d) {
@@ -239,17 +273,22 @@ function renderDueTrend(values) {
   `;
 }
 
-function renderRecommendations(d, coachSummary, weakAreas) {
-  const items = [];
-  if ((d.srs_due || 0) > 0) {
+function renderRecommendations(d, coachSummary, weakAreas, actionCandidates) {
+  const items = (actionCandidates || []).slice(0, 3).map(item => ({
+    page: item.route_page || 'home',
+    text: `${item.title}：${item.reason || '优先执行这个动作。'}`,
+  }));
+  if (!items.length && (d.srs_due || 0) > 0) {
     items.push({ page: 'vocab', text: `先完成今天的 ${d.srs_due} 张词汇复习，最容易形成稳定连续学习。` });
   }
-  if ((coachSummary.weak_area_progress?.current || weakAreas).some(item => String(item).startsWith('grammar'))) {
+  if (!items.length && (coachSummary.weak_area_progress?.current || weakAreas).some(item => String(item).startsWith('grammar'))) {
     items.push({ page: 'grammar', text: '语法仍是当前薄弱项，建议先做一次短练习拉回正确率。' });
-  } else if ((coachSummary.weak_area_progress?.current || weakAreas).some(item => String(item).startsWith('reading'))) {
+  } else if (!items.length && (coachSummary.weak_area_progress?.current || weakAreas).some(item => String(item).startsWith('reading'))) {
     items.push({ page: 'reading', text: '阅读相关分项偏弱，建议做一篇定向阅读训练。' });
   }
-  items.push({ page: 'home', text: coachSummary.tomorrow_reason || '先把今天任务做完，明天系统会自动刷新下一步。' });
+  if (!items.length) {
+    items.push({ page: 'home', text: coachSummary.tomorrow_reason || '先把今天任务做完，明天系统会自动刷新下一步。' });
+  }
   return `
     <div style="display:flex;flex-direction:column;gap:10px">
       ${items.slice(0, 4).map(item => `
@@ -257,6 +296,34 @@ function renderRecommendations(d, coachSummary, weakAreas) {
           ${item.text}
         </button>
       `).join('')}
+    </div>
+  `;
+}
+
+function renderMemoryPanel(memory) {
+  const facts = memory.facts || [];
+  const reviewDue = memory.review_due || [];
+  const forgetting = memory.frequent_forgetting || [];
+  return `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px">
+      <div>
+        <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">最近 Facts</div>
+        ${facts.length
+          ? facts.slice(0, 4).map(item => `<div style="font-size:13px;margin-bottom:8px">${escHtml(item.fact_type)} · ${escHtml(item.fact_key)}</div>`).join('')
+          : '<div style="font-size:13px;color:var(--text-dim)">暂无结构化长期记忆。</div>'}
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">待复习词</div>
+        ${reviewDue.length
+          ? reviewDue.slice(0, 5).map(item => `<div style="font-size:13px;margin-bottom:8px">${escHtml(item.word)} · ${escHtml(item.status)}</div>`).join('')
+          : '<div style="font-size:13px;color:var(--text-dim)">当前没有到期词汇。</div>'}
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:700;letter-spacing:.04em;color:var(--text-dim);margin-bottom:8px">高错词池</div>
+        ${forgetting.length
+          ? forgetting.slice(0, 5).map(item => `<div style="font-size:13px;margin-bottom:8px">${escHtml(item.word)} · wrong ${item.wrong_count || 0}</div>`).join('')
+          : '<div style="font-size:13px;color:var(--text-dim)">当前没有高错词。</div>'}
+      </div>
     </div>
   `;
 }
