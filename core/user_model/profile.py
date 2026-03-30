@@ -15,6 +15,7 @@ from typing import Optional
 
 from core.memory.service import LearnerMemoryService
 from core.memory.store import ensure_memory_schema
+from core.sqlite_runtime import connect_user_db
 
 
 CEFR_LEVELS = ["A1", "A2", "B1", "B2", "C1", "C2"]
@@ -84,8 +85,7 @@ class UserModel:
     """
 
     def __init__(self, db_path: str | Path):
-        self._db = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._db = connect_user_db(db_path)
         self._init_schema()
         ensure_memory_schema(self._db)
         # Migrate: add content_json and starred columns if not present
@@ -179,6 +179,7 @@ class UserModel:
                 created_at     TEXT
             );
         """)
+        self._migrate_coach_schema()
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_coach_plan_user_date ON coach_daily_plan(user_id, plan_date)"
         )
@@ -186,6 +187,65 @@ class UserModel:
             "CREATE INDEX IF NOT EXISTS idx_coach_notification_due ON coach_notification_log(user_id, state, scheduled_for)"
         )
         self._db.commit()
+
+    def _ensure_table_columns(self, table: str, columns: list[tuple[str, str]]) -> None:
+        existing = {row[1] for row in self._db.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, sql_type in columns:
+            if name in existing:
+                continue
+            self._db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+    def _migrate_coach_schema(self) -> None:
+        self._ensure_table_columns(
+            "coach_settings",
+            [
+                ("preferred_study_time", "TEXT DEFAULT '20:00'"),
+                ("quiet_hours_json", "TEXT DEFAULT '{\"start\":\"22:30\",\"end\":\"08:00\"}'"),
+                ("reminder_level", "TEXT DEFAULT 'basic'"),
+                ("desktop_enabled", "INTEGER DEFAULT 1"),
+                ("bark_enabled", "INTEGER DEFAULT 0"),
+                ("webhook_enabled", "INTEGER DEFAULT 0"),
+                ("bark_key", "TEXT DEFAULT ''"),
+                ("webhook_url", "TEXT DEFAULT ''"),
+                ("updated_at", "TEXT DEFAULT ''"),
+            ],
+        )
+        self._ensure_table_columns(
+            "coach_daily_plan",
+            [
+                ("stage", "TEXT DEFAULT 'growth'"),
+                ("status", "TEXT DEFAULT 'planned'"),
+                ("plan_json", "TEXT DEFAULT '{}'"),
+                ("summary_json", "TEXT DEFAULT '{}'"),
+                ("generated_at", "TEXT DEFAULT ''"),
+                ("completed_at", "TEXT DEFAULT ''"),
+            ],
+        )
+        self._ensure_table_columns(
+            "coach_notification_log",
+            [
+                ("plan_id", "TEXT DEFAULT ''"),
+                ("task_key", "TEXT DEFAULT ''"),
+                ("fired_at", "TEXT DEFAULT ''"),
+                ("state", "TEXT DEFAULT 'pending'"),
+                ("dedupe_key", "TEXT DEFAULT ''"),
+                ("payload_json", "TEXT DEFAULT '{}'"),
+                ("created_at", "TEXT DEFAULT ''"),
+            ],
+        )
+        try:
+            self._db.execute(
+                """
+                UPDATE coach_notification_log
+                SET dedupe_key = event_id
+                WHERE COALESCE(dedupe_key, '') = ''
+                """
+            )
+        except Exception:
+            pass
+        self._db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_coach_notification_dedupe ON coach_notification_log(dedupe_key)"
+        )
 
     # ------------------------------------------------------------------
     # Profile CRUD
